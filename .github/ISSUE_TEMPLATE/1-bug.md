@@ -11,13 +11,13 @@ about: Report a bug or issue you've encountered.
 
 ## Actual Behavior
 
-Include a screenshot here.
+[Include a screenshot here.]
 
 ## Logs
 
-If the desktop app crashes or quits unexpectedly, attach all files from `~/Library/Logs/Playbit*` (on MacOS).
+[If the desktop app crashes or quits unexpectedly, attach all files from `~/Library/Logs/Playbit*` (on MacOS).]
 
-If an application crashes, click on the popup to "Debug" it, and take a screenshot of the coredump.
+[If an application crashes, click on the popup to "Debug" it, and take a screenshot of the coredump.]
 
 ## Environment
 
