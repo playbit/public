@@ -1,6 +1,6 @@
 #!BOOTSTRAP
 #!BUILDTOOL src/cc if HERMETIC
-#!BUILDTOOL src/libc if HERMETIC
+#!BUILDTOOL ports/libc if HERMETIC
 #!DEP ports/libc
 include ../../tools/playbit.defs.mk
 
