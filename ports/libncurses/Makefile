@@ -1,5 +1,5 @@
 #!BUILDTOOL src/cc if HERMETIC
-#!BUILDTOOL src/libc if HERMETIC
+#!BUILDTOOL ports/libc if HERMETIC
 #!BUILDTOOL ports/busybox
 #!BUILDTOOL ports/make
 #
