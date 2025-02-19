@@ -1,0 +1,11 @@
+prefix=/
+exec_prefix=/
+includedir=/usr/include
+libdir=/lib
+
+Name: ncursesw
+Description: ncurses 6.5 library
+Version: 6.5.20240427
+URL: https://invisible-island.net/ncurses
+Libs: -L${libdir} -lncursesw
+Cflags: -I${includedir} -DNCURSES_WIDECHAR

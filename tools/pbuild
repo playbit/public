@@ -1,0 +1,3237 @@
+#!/usr/bin/python3
+from __future__ import annotations
+from typing import IO, TypeAlias
+from collections.abc import Sequence as Seq
+from dataclasses import dataclass
+import argparse
+import asyncio
+import ctypes
+import ctypes.util
+import fcntl
+import hashlib
+import io
+import os
+import platform
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+from textwrap import TextWrapper
+
+# PBUILD_BUILDDIR_VERSION: version of BUILDDIR semantics, a monotonically incrementing integer.
+#
+# If an existing BUILDDIR is found with a version different than this,
+# that entire BUILDDIR (except shared/downloads) is considered unusable and will be deleted.
+#
+# DO update PBUILD_BUILDDIR_VERSION when fundamental changes are made to pbuild,
+# like for example where package build state & output is stored.
+#
+# Do NOT update PBUILD_BUILDDIR_VERSION when changes are made which can be gracefully
+# redirected or found, like for example changes to bootstrap layer.
+PBUILD_BUILDDIR_VERSION = 1
+
+VERBOSE = 1
+DRYRUN = False
+CLEANUP = False
+SKIP_DEPS = False
+TIMING = False
+ENABLE_TESTS = False
+SHELL_CMD = ''
+RULE = ''
+INTERACTIVE_SHELL = False
+PBUILD_DIR = Path(__file__).resolve().parent # e.g. /p/tools or /ports/bin
+SRCROOT = PBUILD_DIR.parent                  # e.g. /p, reset by main() based on packages
+NATIVE_ARCH = platform.machine()             # "aarch46" | "x86_64" | "wasm32"
+TARGET_ARCH = NATIVE_ARCH                    # "aarch46" | "x86_64" | "wasm32"
+PLATFORM_IS_PLAYBIT = 'playbit' in platform.release()
+HERMETIC = False
+BUILDDIR = Path('/var/pbuild') # may be set by main() with --build-dir
+BUILD_CONFIG_ID = ''
+
+MAKE = '/usr/bin/make'
+FIND = '/usr/bin/find'
+CHROOT = '/sbin/chroot'
+INDEXFILES = ('pbuild.mk', 'Makefile', 'pbuild.sh')
+CC_PKG_NAME = 'src/cc'
+
+# "{pkg.name} {pkg.arch}" => Pkg
+pkgindex = {}
+
+CLEAN = False
+CLEAN_ALL = False
+FORCE = False
+DEBUG = False
+STDOUT_IS_TTY = False
+STDERR_IS_TTY = False
+COLORS_STDOUT = False
+COLORS_STDERR = False
+SHOW_BUILD_OUTPUT = False
+TOPLEVEL_DEFINES = {}
+JOBS = 0
+VALID_ARCHS = ('aarch64', 'x86_64', 'wasm32')
+
+exit_status = 0
+
+ANSI_ESC = {
+	'bold': '\x1B[1m',
+	'dim': '\x1B[2m',
+
+	'red': '\x1B[1;31m',
+	'green': '\x1B[1;32m',
+	'yellow': '\x1B[1;33m',
+	'blue': '\x1B[1;34m',
+	'purple': '\x1B[1;35m',
+	'teal': '\x1B[1;36m',
+	'white': '\x1B[1;37m',
+	'black': '\x1B[1;30m',
+
+	'reset': '\x1B[0m',
+	'reset-fg': '\x1B[39m',
+	'reset-bg': '\x1B[49m',
+}
+
+
+def ansi_style(to_be_wrapped, style: str):
+	open = ''
+	for s in style.split(','):
+		open += ANSI_ESC.get(s, '')
+	return open + str(to_be_wrapped) + "\x1B[0m"
+
+
+STRIP_ANSI_CODES_RE = re.compile(r'\x1B\[[0-?9;]*[mK]')
+
+def strip_ansi_codes(s: str) -> str:
+	return STRIP_ANSI_CODES_RE.sub('', s)
+
+
+def term_cols(default: int = 80) -> int:
+	try:
+		return os.get_terminal_size().columns
+	except OSError:
+		return default
+
+
+def plural(count: int, name: str) -> str:
+	count = int(count)
+	if count == 1:
+		return f"{count} {name}"
+	return f"{count} {name}s"
+
+
+statusline = None # StatusLine|None
+
+
+def log(message, *args, color='', **kwargs):
+	if statusline:
+		statusline.end()
+	if color and COLORS_STDERR:
+		message = ansi_style(message, color)
+	print(message, *args, **kwargs, file=sys.stderr)
+
+
+def log_horizontal_line():
+	log('—' * term_cols())
+
+
+def mkdirs(path: Path|str):
+	path = Path(path)
+	if not DRYRUN and not path.exists():
+		path.mkdir(parents=True, exist_ok=True)
+		if VERBOSE > 2: log(f"created directory {str(path)!r}")
+
+
+def rmdir(path, ignore_errors: bool = False, silent: bool = False):
+	path = str(path)
+	try:
+		os.rmdir(path)
+		if VERBOSE > 2 and not silent: log(f"removed directory {path!r}")
+	except Exception as e:
+		if not ignore_errors:
+			raise e
+		if VERBOSE > 2: log(f"failed to remove directory {path!r}: {e}")
+
+
+def rmtree(path, verbose=False):
+	rm_args = "-rfv" if verbose else "-rf"
+	if not DRYRUN: # just to be sure
+		subprocess.run(["/bin/rm", rm_args, str(path)])
+
+
+def rmfile(path, ignore_errors: bool = False, silent: bool = False):
+	path = str(path)
+	try:
+		os.remove(path)
+		if VERBOSE > 2 and not silent: log(f"removed file {path!r}")
+	except Exception as e:
+		if not ignore_errors:
+			raise e
+		if VERBOSE > 2: log(f"failed to remove file {path!r}: {e}")
+
+
+def get_disk_usage(dir: Path|str) -> str:
+	# Note: "du" only count hardlinks once (i.e. "disk usage", not "total size")
+	# Output of "du" looks like this: "123K<TAB>/path/to/dir<LF>"
+	p = subprocess.run(["du", "-s", "-x", "-h", str(dir)], capture_output=True)
+	size, _ = p.stdout.decode('utf8').strip().split(None, 1)
+	return size
+
+
+def checksum_dir(dir: Path|str) -> str:
+	# - for each file in the tree dir
+	# - invoke sha1sum with up to JOBS filenames,
+	#   running up to JOBS sha1sum processes in parallel
+	# - sort output by filename (2nd field from sha1sum output)
+	# - sum all files with sha256sum
+	# - I: tells xargs to replace ":" with each input line (allowing spaces in filenames)
+	xargs = f"-n {JOBS} -P {JOBS}" if JOBS > 1 else ""
+	script = f"find . -type f | xargs {xargs} -I: sha1sum : | sort -k2 | sha256sum"
+	dir = str(dir)
+	if VERBOSE > 2:
+		log(f"exec_shell: cd {dir!r} && {script}")
+	p = subprocess.run(["/bin/sh", "-c", script], cwd=dir, capture_output=True)
+	if p.returncode != 0:
+		stderr = p.stderr.decode('utf8').strip()
+		raise Exception(f"checksum directory {dir!r}: {stderr}")
+	checksum = p.stdout.decode('utf8').strip().split(None, 1)[0]
+	return checksum
+
+
+# libc
+libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
+libc.mount.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p)
+libc.umount2.argtypes = (ctypes.c_char_p, ctypes.c_int)
+
+def libc_raise_errno(message: str):
+	errno = ctypes.get_errno()
+	if message:
+		message += ": "
+	raise OSError(errno, f"{message}{os.strerror(errno)}")
+
+# mount flags, from /usr/include/sys/mount.h
+libc_MS_RDONLY       = 1
+libc_MS_NOSUID       = 2
+libc_MS_NODEV        = 4
+libc_MS_NOEXEC       = 8
+libc_MS_SYNCHRONOUS  = 16
+libc_MS_REMOUNT      = 32
+libc_MS_MANDLOCK     = 64
+libc_MS_DIRSYNC      = 128
+libc_MS_NOSYMFOLLOW  = 256
+libc_MS_NOATIME      = 1024
+libc_MS_NODIRATIME   = 2048
+libc_MS_BIND         = 4096
+libc_MS_MOVE         = 8192
+libc_MS_REC          = 16384
+libc_MS_SILENT       = 32768
+libc_MS_POSIXACL     = (1<<16)
+libc_MS_UNBINDABLE   = (1<<17)
+libc_MS_PRIVATE      = (1<<18)
+libc_MS_SLAVE        = (1<<19)
+libc_MS_SHARED       = (1<<20)
+libc_MS_RELATIME     = (1<<21)
+libc_MS_KERNMOUNT    = (1<<22)
+libc_MS_I_VERSION    = (1<<23)
+libc_MS_STRICTATIME  = (1<<24)
+libc_MS_LAZYTIME     = (1<<25)
+libc_MS_NOREMOTELOCK = (1<<27)
+libc_MS_NOSEC        = (1<<28)
+libc_MS_BORN         = (1<<29)
+libc_MS_ACTIVE       = (1<<30)
+libc_MS_NOUSER       = (1<<31)
+
+# unmount flags, from /usr/include/sys/mount.h
+libc_MNT_FORCE       = 1
+libc_MNT_DETACH      = 2
+libc_MNT_EXPIRE      = 4
+libc_UMOUNT_NOFOLLOW = 8
+
+# flags are bits libc_MS_*
+# E.g. libc_mount('/dev/sdb1', '/mnt', 'ext4', 'rw')
+def libc_mount(source, target, fs='', flags=0, options=''):
+	source = str(source)
+	target = str(target)
+	if VERBOSE > 3:
+		msg = "remounting" if (flags & libc_MS_REMOUNT) else "mounting"
+		msg += f" {source!r} at {target!r}"
+		if source != fs and fs != '':
+			msg += f" (fs={fs})"
+		if options and options != '':
+			msg += f" with options {options!r}"
+		log(msg)
+	target_bin = target.encode()
+	if libc.mount(source.encode(), target_bin, fs.encode(), flags, options.encode()) < 0:
+		libc_raise_errno(f"Error mounting {source!r} ({fs}) on {target!r} with options {options!r}")
+	# note: we have to MS_REMOUNT a second time to actually make bind mounts read-only
+	if (flags & libc_MS_REMOUNT) == 0 and flags & libc_MS_RDONLY and flags & libc_MS_BIND:
+		if libc.mount(b'', target_bin, b'', libc_MS_REMOUNT|libc_MS_RDONLY, b'') < 0:
+			libc_raise_errno(f"Error remounting {target!r} as read-only")
+
+
+# flags are bits libc_MNT_* and libc_UMOUNT_*
+def libc_umount(target, flags=0):
+	target = str(target)
+	if VERBOSE > 3:
+		log(f"unmounting {target!r}")
+	if libc.umount2(target.encode(), flags) < 0:
+		libc_raise_errno(f"Error unmounting {target!r}")
+
+
+def rescue_unmount_all_pbuild():
+	builddir_prefix = str(BUILDDIR) + '/'
+	mountpoints = []
+	with open("/proc/self/mounts", 'r') as f:
+		for line in f:
+			v = line.split()
+			if v[1].startswith(builddir_prefix):
+				mountpoints.append(v[1])
+	for mountpoint in reversed(mountpoints):
+		try:
+			libc_umount(mountpoint)
+		except:
+			log(f'umount({mountpoint!r}) failed; trying with MNT_FORCE')
+			try:
+				libc_umount(mountpoint, libc_MNT_FORCE)
+			except:
+				log(f'umount({mountpoint!r}, MNT_FORCE) failed; giving up')
+
+
+def unmount(target, flags=0):
+	target = str(target)
+	try:
+		libc_umount(target, flags)
+	except OSError as err:
+		log(f"warning: failed to unmount {target!r} ({err})")
+		rescue_unmount_all_pbuild()
+
+
+def unmount_and_rmdir(dir: Path|str):
+	unmount(dir)
+	rmdir(dir)
+
+
+class Deferred:
+	def __init__(self):
+		self.finalizers = []
+	def __enter__(self) -> 'Self':
+		self.finalizers = []
+		return self
+	def __call__(self, f, *args, **kwargs):
+		self.finalizers.append((f, args, kwargs))
+	def __exit__(self, exception_type, exception_value, exception_traceback):
+		for f, args, kwargs in reversed(self.finalizers):
+			try:
+				f(*args, **kwargs)
+			except Exception as e:
+				print(f"Exception during defer: {e}", file=sys.stderr)
+				if not exception_value:
+					exception_value = e
+		if exception_value:
+			raise exception_value
+
+
+def fmt_duration(nanoseconds: int, short: bool=False) -> str: # e.g. 99:59:59.001
+	if short:
+		if nanoseconds < 1000:
+			return f"{nanoseconds:.0f}ns"
+		elif nanoseconds < 1_000_000:
+			return f"{nanoseconds / 1000:.1f}us"
+		elif nanoseconds < 1_000_000_000:
+			return f"{nanoseconds / 1_000_000:.1f}ms"
+		else:
+			return f"{nanoseconds / 1_000_000_000:.1f}s"
+	else:
+		total_seconds = nanoseconds / 1_000_000_000
+		hours = int(total_seconds // 3600)
+		total_seconds %= 3600
+		minutes = int(total_seconds // 60)
+		seconds = total_seconds % 60
+		return f"{hours:02}:{minutes:02}:{seconds:06.3f}"
+
+
+class Timing:
+	label: str
+	start_time: int
+
+	def __init__(self):
+		self.label = '<Timing.start() not called>'
+		self.start_time = time.perf_counter_ns()
+
+	def start(self, label: str) -> 'Self':
+		return self.restart(label)
+
+	def restart(self, label: str) -> 'Self':
+		self.label = label
+		self.start_time = time.perf_counter_ns()
+		return self
+
+	def end(self) -> 'Self':
+		if TIMING:
+			duration = fmt_duration(time.perf_counter_ns() - self.start_time)
+			s = f"[timing] {duration} {self.label}"
+			if COLORS_STDERR:
+				s = ansi_style(s, 'blue')
+			log(s)
+		return self
+
+	def end_and_restart(self, label: str) -> 'Self':
+		self.end()
+		self.restart(label)
+		return self
+
+	def __enter__(self) -> 'Self':
+		self.start_time = time.perf_counter_ns()
+		return self
+
+	def __exit__(self, exception_type, exception_value, exception_traceback):
+		self.end()
+
+
+class PkgNotFound(Exception):
+	pass
+
+class PkgCyclicDepError(Exception):
+	pass
+
+class PkgMetaSyntaxError(Exception):
+	pass
+
+class Conditional(Exception):
+	file: str
+	line: int
+	pysrc: str
+
+	def __init__(self, file: str, line: int, pysrc: str):
+		self.file = file
+		self.line = int(line)
+		self.pysrc = pysrc
+
+
+	def eval(self, ARCH: str) -> bool:
+		# expect the python snippet to start with "if "
+		if not self.pysrc.startswith('if '):
+			raise PkgMetaSyntaxError(f'{self.file}:{self.line}: missing "if"')
+		# trim "if " away so we get just the condition expression
+		pysrc = self.pysrc[3:]
+		try:
+			f = compile(pysrc, self.file, 'eval')
+			return eval(f)
+		except SyntaxError as exc:
+			# adjust line
+			if self.line <= 1:
+				raise
+			line = self.line - 1
+			msg, info = exc.args
+			info = list(info)
+			info[1] = info[1] + line
+			if len(info) > 4:
+				info[4] = info[4] + line
+			raise SyntaxError(msg, info)
+
+
+class OverlayFS:
+	lowerdirs: [Path|str] # e.g. with [C,B,A], C is on top of B and A is the bottom layer
+	mountpoint: Path
+	upperdir: Path|None
+	workdir: Path|None
+
+	opt_metacopy: bool = True  # chmod only copies metadata, not entire file
+	opt_redirect_dir: bool = True  # allow renaming directories
+	opt_index: bool = False  # support copy up of hardlinks
+	opt_xino: bool = True  # make st_ino and st_dev act normal
+
+	deleteMountpointAfterUnmount: bool = False
+	mountFlags: int = 0
+	unmountFlags: int = 0
+
+	def __init__(self, lowerdirs: Seq[Path|str], mountpoint: Path|str,
+	             upperdir: Path|str = None, workdir: Path|str = None,
+	             mountFlags: int = 0, unmountFlags: int = 0):
+		self.lowerdirs = list(lowerdirs)
+		self.mountpoint = Path(mountpoint)
+		self.upperdir = Path(upperdir) if upperdir else None
+		self.workdir = Path(workdir) if workdir else None
+		self.mountFlags = mountFlags
+		self.unmountFlags = unmountFlags
+		if len(self.lowerdirs) == 0: raise Exception('lowerdirs is empty')
+		if self.upperdir and not self.workdir: raise Exception('workdir is not set')
+		if self.workdir and not self.upperdir: raise Exception('upperdir is not set')
+
+	def is_read_only(self) -> bool:
+		return self.upperdir is None
+
+	def mount(self) -> Self:
+		# See https://www.kernel.org/doc/html/latest/filesystems/overlayfs.html
+		self.mountpoint.mkdir(parents=True, exist_ok=True)
+
+		# Use bind mount for read-only, single lowerdir since overlayfs in read-only mode
+		# requires at least two upperdirs.
+		if self.is_read_only() and len(self.lowerdirs) == 1:
+			mountpoint = str(self.mountpoint)
+			libc_mount(str(self.lowerdirs[0]), mountpoint, flags=libc_MS_BIND|libc_MS_RDONLY)
+			# note: we have to MS_REMOUNT a second time to make the mount read-only
+			# libc_mount("", mountpoint, flags=libc_MS_BIND|libc_MS_RDONLY|libc_MS_REMOUNT)
+			return self
+
+		lowerdirs = ':'.join(str(path).replace(',','\\,') for path in self.lowerdirs)
+		options = [f"lowerdir={lowerdirs}"]
+		flags = self.mountFlags
+
+		if self.is_read_only():
+			# Note: don't append "ro" to options here
+			flags |= libc_MS_RDONLY
+		else:
+			options.append(f"upperdir={self.upperdir}")
+			options.append(f"workdir={self.workdir}")
+			self.upperdir.mkdir(parents=True, exist_ok=True)
+			self.workdir.mkdir(parents=True, exist_ok=True)
+			if self.opt_metacopy: options.append("metacopy=on")
+			if self.opt_redirect_dir: options.append("redirect_dir=on")
+			if self.opt_index: options.append("index=on")
+			if self.opt_xino: options.append("xino=auto")
+
+		libc_mount("overlay", str(self.mountpoint), fs="overlay",
+		           flags=flags, options=','.join(options))
+
+		return self
+
+	def unmount(self):
+		unmount(self.mountpoint, flags=self.unmountFlags)
+		if self.workdir:
+			rmtree(self.workdir, verbose=VERBOSE > 2)
+		if self.deleteMountpointAfterUnmount:
+			try:
+				self.mountpoint.rmdir()
+			except OSError as err:
+				unmount(self.mountpoint, flags=libc_MNT_FORCE)
+				try:
+					self.mountpoint.rmdir()
+				except:
+					pass
+
+	def __enter__(self) -> Self:
+		return self.mount()
+
+	def __exit__(self, exception_type, exception_value, exception_traceback):
+		self.unmount()
+		if exception_value:
+			raise exception_value
+
+
+#——————————————————————————————————————————————————————————————————————————————————————————————————
+# build utils
+
+
+def copy(srcfile, dstfile):
+	if VERBOSE > 2: log(f"COPY {srcfile} -> {dstfile}")
+	shutil.copy2(str(srcfile), str(dstfile))
+
+def symlink(target, dstfile, force=False):
+	if VERBOSE > 2: log(f"SYMLINK {dstfile} -> {target}")
+	target = str(target)
+	dstfile = str(dstfile)
+	try:
+		os.symlink(target, dstfile)
+	except FileNotFoundError:
+		mkdirs(Path(dstfile).parent)
+		os.symlink(target, dstfile)
+	except FileExistsError:
+		if force:
+			os.remove(dstfile)
+			os.symlink(target, dstfile)
+
+
+EXPORT_SUBDIRS_TO_IGNORE = (
+	'build',
+	'dev',
+	'p',
+	'pbuild',
+	'proc',
+	'run',
+	'swap',
+	'sys',
+	'tmp',
+	'vhost',
+)
+
+WHITEOUT_DIRS = (
+	'build',
+	'dev',
+	'p',
+	'pbuild',
+	'proc',
+	'swap',
+	'sys',
+	'tmp',
+	'usr/include/c++',
+	'vhost',
+)
+
+
+def setup_special_dir(name: str, create_function, version) -> Path:
+	dir = BUILDDIR / f"_pbuild.{name}"
+	version_file = Path(str(dir) + ".version")
+
+	if not version_file.parent.exists():
+		mkdirs(version_file.parent)
+
+	version_fp = version_file.open('a+')
+	is_locked = False
+	try:
+		fcntl.flock(version_fp.fileno(), fcntl.LOCK_EX)
+		is_locked = True
+	except:
+		log(f"pbuild: warning:", f"flock {str(version_file)!r}: {e}", color='yellow')
+		pass
+
+	try:
+		if dir.exists():
+			# check version
+			curr_version = ''
+			try:
+				version_fp.seek(0)
+				curr_version = version_fp.read().strip()
+			except Exception as e:
+				log(f"pbuild: warning:", f"read {str(version_file)!r}: {e}", color='yellow')
+			if curr_version == str(version):
+				# up to date
+				return dir
+			rmtree(dir)
+		if VERBOSE > 1:
+			log(f"pbuild: creating \"{name}\" dir {str(dir)!r}")
+		dir.mkdir(parents=True)
+		create_function(dir)
+		version_fp.truncate(0)
+		version_fp.write(str(version))
+	finally:
+		if is_locked:
+			fcntl.flock(version_fp.fileno(), fcntl.LOCK_UN)
+		version_fp.close()
+
+	return dir
+
+
+def setup_whiteout_dir() -> Path:
+	# create whiteout entries in upper dir to hide non-package files present in lower layers
+	version = 2
+	def create(whiteout_dir):
+		whiteout_dir.mkdir(parents=True, exist_ok=True)
+		for path in WHITEOUT_DIRS:
+			try:
+				os.mknod(f"{whiteout_dir}/{path}", mode=stat.S_IFCHR, device=0)
+			except:
+				if VERBOSE:
+					log(f"warning: mknod({whiteout_dir}/{path}) failed")
+
+	return setup_special_dir("whiteout", create, version)
+
+
+def setup_baselayer_dir() -> Path:
+	version = 3
+
+	def create(baselayer):
+		# minimal fs
+		for dir in ('bin', 'sbin', 'lib', 'etc'):
+			mkdirs(baselayer / dir)
+
+		# usr/ symlinks
+		for dir in ('bin', 'sbin', 'lib'):
+			symlink('../' + dir, baselayer / "usr" / dir)
+
+		# distroot/ dirs + distroot/usr/ symlinks
+		mkdirs(baselayer / 'distroot' / 'usr')
+		for dir in ('bin', 'sbin', 'lib'):
+			mkdirs(baselayer / 'distroot' / dir)
+			symlink('../' + dir, baselayer / 'distroot' / 'usr' / dir)
+
+		if not HERMETIC:
+			# Hermetic builds either has no /sysroot or one managed by src/cc,
+			# but regular (non hermetic) builds need /sysroot to point to /distroot
+			symlink('../distroot', baselayer / 'sysroot' / TARGET_ARCH)
+			symlink('../../../usr/share/clang', baselayer / 'distroot/usr/share/clang')
+			for fn in ('clang', f'clang-{TARGET_ARCH}-playbit'):
+				symlink('../../lib/' + fn, baselayer / 'distroot/lib' / fn)
+
+	dir_id = "baselayer" if HERMETIC else f"baselayer.{TARGET_ARCH}"
+	return setup_special_dir(dir_id, create, version)
+
+
+def setup_bootstrap_dir() -> Path:
+	version = 1
+	def create(bootstrapdir):
+		# usr/ symlinks
+		for dir in ('bin', 'sbin', 'lib'):
+			symlink('../' + dir, bootstrapdir / "usr" / dir)
+
+		for dir in ('lib', 'bin', 'sbin', 'usr', 'etc', 'home/root', 'var', 'run'):
+			(bootstrapdir / dir).mkdir(parents=True, exist_ok=True)
+
+		# libc.so
+		libc = "/lib/libc.so"
+		if not PLATFORM_IS_PLAYBIT:
+			libc = f"/lib/ld-musl-{NATIVE_ARCH}.so.1"
+			if not Path(libc).exists():
+				libc = f"/usr/lib/libc.so"
+		copy(libc, bootstrapdir / "lib/libc.so")
+
+		# dynamic loader
+		symlink('libc.so', bootstrapdir / "lib/ld.so.1")
+		if not PLATFORM_IS_PLAYBIT:
+			symlink('libc.so', bootstrapdir / f"lib/ld-musl-{NATIVE_ARCH}.so.1")
+
+		# ldd utility
+		symlink('../lib/libc.so', bootstrapdir / "bin/ldd")
+
+		# busybox (coreutils)
+		busybox = "/sbin/busybox" if PLATFORM_IS_PLAYBIT else "/bin/busybox"
+		copy(busybox, bootstrapdir / "sbin/busybox")
+		# note: we install links to commands later on using chroot
+
+		# other programs
+		libs = set()
+		for name in ('curl', 'make', 'patch'):
+			copy('/usr/bin/'+name, bootstrapdir / ("bin/"+name))
+			# get list of shared libraries via ldd
+			p = subprocess.run(["/usr/bin/ldd", '/usr/bin/'+name], capture_output=True)
+			for line in p.stdout.decode('utf8').strip().split('\n'):
+				parts = line.split(' => /')
+				if len(parts) > 1:
+					libfile = '/' + parts[1].split(' ', 2)[0]
+					if libfile.endswith('/libc.so') or libfile.find('/lib/ld-musl-') != -1:
+						continue
+					libs.add(libfile)
+		for srcfile in libs:
+			dstfile = str(bootstrapdir / ("lib/" + srcfile.split('/')[-1]))
+			srcfile = os.path.realpath(srcfile)
+			copy(srcfile, dstfile)
+
+		# /etc
+		for name in ('hostname', 'hosts', 'motd', 'passwd', 'group',
+		             'shadow', 'profile', 'resolv.conf'):
+			copy('/etc/'+name, bootstrapdir / ("etc/"+name))
+
+		# /etc/ssl
+		if PLATFORM_IS_PLAYBIT:
+			mkdirs(bootstrapdir / 'etc/ssl')
+			for name in ('cert.pem', 'ct_log_list.cnf', 'openssl.cnf'):
+				copy('/etc/ssl/'+name, bootstrapdir / ("etc/ssl/"+name))
+		else:
+			mkdirs(bootstrapdir / 'etc/ssl/certs')
+			mkdirs(bootstrapdir / 'etc/ssl/misc')
+			for name in ('certs/ca-certificates.crt', 'ct_log_list.cnf', 'openssl.cnf'):
+				copy('/etc/ssl/'+name, bootstrapdir / ("etc/ssl/"+name))
+			symlink('certs/ca-certificates.crt', bootstrapdir / 'etc/ssl/cert.pem')
+
+		# install busybox links
+		subprocess.run([CHROOT, str(bootstrapdir), "/sbin/busybox", "--install"],
+		               check=True)
+
+	return setup_special_dir("bootstrap", create, version)
+
+
+def clear_xattrs_from_tree(dir: Path|str, *attrs: str):
+	def visit(path):
+		for attr in attrs:
+			try:
+				os.removexattr(path, attr)
+				if VERBOSE > 2:
+					log(f"removed xattr {attr!r} from {path!r}")
+			except:
+				pass
+	dir = str(dir)
+	for root, dirs, _ in os.walk(dir, topdown=False, followlinks=False):
+		for name in dirs:
+			visit(os.path.join(root, name))
+	visit(dir)
+
+
+def open_logfile(path: str|Path) -> file:
+	path = Path(path)
+	mkdirs(path.parent)
+	return path.open('wb')
+
+
+class NoOpCtxManager:
+	def __enter__(self) -> 'Self':
+		return self
+
+	def __exit__(self, exception_type, exception_value, exception_traceback):
+		if exception_value:
+			raise exception_value
+
+
+class StatusLine:
+	prefix: str
+	prefix_len: int
+	width: int
+	active: bool
+
+	def __init__(self, prefix: str):
+		self.active = False
+		self.width = term_cols(default=4096)
+		if self.width < 20:
+			self.width = 20
+		self.set_prefix(prefix)
+
+	def set_prefix(self, prefix: str):
+		prefix_plain = strip_ansi_codes(prefix)
+		prefix_len = len(prefix_plain)
+		prefix_maxlen = self.width // 2
+		if prefix_len > prefix_maxlen:
+			prefix_len = prefix_maxlen
+			prefix = prefix_plain[:prefix_maxlen-1] + " "
+			self.width -= prefix_maxlen
+		# \r = move cursor to beginning of line
+		self.prefix = '\r' + prefix
+		self.prefix_len = prefix_len
+
+	def clear(self):
+		if self.active:
+			# \r = move cursor to beginning of line
+			# \e[2K = erase the entire line
+			sys.stdout.write('\r\x1B[2K')
+			sys.stdout.flush()
+
+	def end(self, line: str|None = None):
+		if line is not None:
+			self.update(line)
+		elif not self.active:
+			return
+		sys.stdout.write("\n")
+		sys.stdout.flush()
+		self.active = False
+
+	def write(self, line: str):
+		self.update(line)
+
+	def update(self, line: str):
+		line = line.strip()
+		self.active = True
+		line_plain = strip_ansi_codes(line).replace('\t', ' ')
+		line_len = len(line_plain)
+		if self.prefix_len + line_len > self.width:
+			# "XXhel lo" 7
+			# "hel lo"   5
+			#     ^ 3
+			nchar = (self.width - self.prefix_len) - 1
+			tail_len = len(line_plain) - nchar
+			tail = line[-tail_len:]
+			if tail != line_plain[-tail_len:]:
+				# ansi codes beyond cutoff point; use plain text
+				line = line_plain[:nchar-1] + "…"
+			else:
+				line = line[:-tail_len] + "…"
+		# \e[K = erase from cursor to end of line
+		sys.stdout.write(self.prefix + line + "\x1B[K")
+		sys.stdout.flush()
+
+	def __enter__(self) -> 'Self':
+		global statusline
+		if statusline == None:
+			statusline = self
+		return self
+
+	def __exit__(self, exception_type, exception_value, exception_traceback):
+		global statusline
+		if statusline == self:
+			statusline = None
+		if self.active:
+			self.end()
+		if exception_value:
+			raise exception_value
+
+
+def run_logged_cmd_echo(logfile: file, cmd: [str], cwd: str, env) -> bool:
+	try:
+		os.truncate(self.build_log, 0)
+	except:
+		pass
+	if VERBOSE > 1: log_horizontal_line()
+	p = subprocess.run(cmd, cwd=cwd, env=env)
+	if VERBOSE > 1: log_horizontal_line()
+	return p.returncode == 0
+
+
+WHITESPACE_SEQ_RE = re.compile(r'[ \t\r\n]+')
+
+
+def collapse_whitespace(s: str) -> str:
+    return WHITESPACE_SEQ_RE.sub(' ', s).strip()
+
+
+async def run_logged_cmd_fwd(logfile: file, cmd: [str], cwd: str, env, writable) -> bool:
+	with open_logfile(logfile) as logfp:
+		p = await asyncio.create_subprocess_exec(*cmd, cwd=cwd, env=env,
+		                                         stdout=asyncio.subprocess.PIPE,
+		                                         stderr=asyncio.subprocess.PIPE)
+		async def stream_line_reader2(stream):
+			while True:
+				try:
+					line = await stream.readline()
+				except:
+					# line too long
+					continue
+				if not line:
+					break
+				logfp.write(line)
+				line = collapse_whitespace(line.decode('utf8'))
+				if line:
+					writable.write(line)
+		await asyncio.gather(
+			stream_line_reader2(p.stdout),
+			stream_line_reader2(p.stderr),
+		)
+		await p.wait()
+		return p.returncode == 0
+
+
+async def run_logged_cmd_progress(logfile: str, cmd: [str], cwd: str, env) -> bool:
+	# print a period "." per line of output
+	with open_logfile(logfile) as logfp:
+		p = await asyncio.create_subprocess_exec(*cmd, cwd=cwd, env=env,
+		                                         stdout=asyncio.subprocess.PIPE,
+		                                         stderr=asyncio.subprocess.PIPE)
+		ndots = 0
+		maxcols = term_cols(default=0)
+		async def stream_line_reader2(stream, is_stdout):
+			nonlocal ndots
+			while True:
+				try:
+					line = await stream.readline()
+				except:
+					# line too long
+					continue
+				if not line:
+					break
+				ndots += 1
+				if ndots > 1:
+					if maxcols > 0 and ndots % maxcols == 0:
+						sys.stdout.write('\r\x1B[K')
+					if is_stdout:
+						dot = '.'
+					else:
+						dot = '!'
+					sys.stdout.write(dot)
+					sys.stdout.flush()
+				logfp.write(line)
+		await asyncio.gather(
+			stream_line_reader2(p.stdout, True),
+			stream_line_reader2(p.stderr, False),
+		)
+		await p.wait()
+		if p.returncode == 0:
+			if ndots > 1:
+				sys.stdout.write('\r\x1B[K')
+		else:
+			if ndots > 1:
+				sys.stdout.write('\n')
+		return p.returncode == 0
+
+
+async def run_logged_cmd_quiet(logfile: file, cmd: [str], cwd: str, env) -> bool:
+	# just write to log file
+	with open_logfile(logfile) as logfp:
+		p = await asyncio.create_subprocess_exec(
+			*cmd, cwd=cwd, stdout=logfp, stderr=logfp, env=env)
+		await p.wait()
+		return p.returncode == 0
+
+
+#——————————————————————————————————————————————————————————————————————————————————————————————————
+
+# Python >=3.12 has type aliases:
+# type Tags = set[str]
+# type PkgDep = tuple[Pkg,Tags]
+# type PkgBuildDep = tuple[PkgBuild,Tags]
+
+Pkg_t: TypeAlias = "Pkg"
+PkgBuild_t: TypeAlias = "PkgBuild"
+
+Tags = tuple[str]
+PkgDep = tuple[Pkg_t, Tags, Conditional|None]
+PkgArchDep = tuple[Pkg_t, str, Conditional|None] # (pkg, mountpoint, cond)
+PkgBuildDep = tuple[PkgBuild_t, Tags]
+PkgBuildArchDep = tuple[PkgBuild_t, str] # (pkgbuild, mountpoint)
+
+#——————————————————————————————————————————————————————————————————————————————————————————————————
+
+class Pkg:
+	name:          str            # e.g. system/lib/libc
+	dir:           Path           # e.g. /p/system/lib/libc
+	indexfile:     str            # e.g. Makefile
+	indexfile_st:  os.stat_result
+	is_toplevel:   bool
+	directives:    dict[str,any]|None
+	deps:          [PkgDep]
+	hostdeps:      [PkgDep]
+	archdeps:      dict[str,list[PkgArchDep]] # arch => [PkgArchDep]
+	deps_resolved: bool = False
+	src_mtime:     int # max mtime in nanoseconds of pkg source files (0 if unknown)
+	src_resolved:  bool = False
+
+
+	def __init__(self, name: str, dir: Path, indexfile: str, indexfile_st: os.stat_result,
+	             is_toplevel: bool):
+		self.name = name
+		self.dir = dir
+		self.indexfile = indexfile
+		self.indexfile_st = indexfile_st
+		self.is_toplevel = is_toplevel
+		self.directives = None
+		self.deps = []
+		self.hostdeps = []
+		self.archdeps = {}
+		self.src_mtime = indexfile_st.st_mtime_ns
+
+
+	def __str__(self):
+		return self.name
+
+
+	def __repr__(self):
+		return f'Pkg({repr(self.name)}, {repr(self.dir)},' +\
+		       f' {repr(self.indexfile)}, {repr(self.indexfile_st)})'
+
+
+	def load_directives(self):
+		self.directives = scan_directives(self.dir / self.indexfile)
+		if VERBOSE > 3:
+			log(f'{self.name}: directives in {self.indexfile}: {self.directives!r}')
+
+
+	def has_directive(self, name: str) -> bool:
+		if self.directives is None:
+			self.load_directives()
+		return name in self.directives
+
+
+	def get_directive(self, name: str, defaultval=None):
+		if self.directives is None:
+			self.load_directives()
+		return self.directives.get(name, defaultval)
+
+
+	def is_metapackage(self) -> bool:
+		return self.has_directive('METAPACKAGE')
+
+
+	def eval_ignore_cond(self, pathstr: str, cond: Conditional|None, archs: Seq[str]) -> bool:
+		if not cond:
+			# unconditional "IGNORE"
+			return True
+		for arch in archs:
+			v = cond.eval(ARCH=arch)
+			if VERBOSE > 2:
+				snippet = f"IGNORE {pathstr} {cond.pysrc}"
+				log(f'{self}: eval({arch}) {snippet!r} => {v!r}')
+			if not v:
+				return False
+		# all conditionals pass, meaning we should ignore the source for all archs
+		return True
+
+
+	def make_find_sources_args(self, dir: Path, reffile: str, archs: Seq[str],
+	                           ignore: dict[str,Conditional|None]|None) -> [str]:
+		find_args = [FIND, '.']
+		ign_file_args = []
+		ign_dir_args = []
+		if ignore:
+			for pathstr, cond in ignore.items():
+				path = pathstr.strip().rstrip('/')
+				if not path.startswith('/') and not path.startswith('./'):
+					path = './' + path
+
+				if self.eval_ignore_cond(pathstr, cond, archs):
+					if (dir / Path(path)).is_dir():
+						if len(ign_dir_args) > 0:
+							ign_dir_args.append('-o')
+						ign_dir_args.extend(['-path', path + '/*'])
+					else:
+						ign_file_args.extend(['-not', '-path', path])
+
+			if len(ign_dir_args) > 0:
+				# This is a bit complicated but basically "-prune" is a "find" action which
+				# excludes a directory from traversal when the predcondition matches.
+				# So what we do is conceptually to setup the condition, e.g.
+				#   "if type is directory and path is one of (a/* b/* ...) then skip"
+				# Followed by "-o" for a second branch for anything else.
+				find_args.extend(['-type', 'd', '('])
+				find_args.extend(ign_dir_args)
+				find_args.extend([')', '-prune', '-o'])
+			if len(ign_file_args) > 0:
+				find_args.extend(ign_file_args)
+		find_args.extend(['-not', '-type', 'd'])
+		if reffile != '':
+			find_args.extend(['-newer', reffile])
+		if len(ign_dir_args) > 0:
+			find_args.append('-print')
+		return find_args
+
+
+	async def find_sources(self, dir: Path, reffile: str, archs: Seq[str],
+	                       ignore: dict[str,Conditional|None]|None) -> str:
+		find_args = self.make_find_sources_args(dir, reffile, archs, ignore)
+
+		# note: using 'find' is much faster than a python implementation like for example
+		# using os.walk, even when done via asyncio.to_thread.
+		if VERBOSE > 2:
+			log(f'{self}: running command at {str(dir)!r}: {fmt_exec_args(find_args)}')
+		proc = await asyncio.create_subprocess_exec(*find_args,
+		                                            cwd=dir,
+		                                            stdout=asyncio.subprocess.PIPE,
+		                                            stderr=asyncio.subprocess.PIPE)
+		stdout, stderr = await proc.communicate()
+		if proc.returncode != 0:
+			log(f'{self}: warning: failed to locate sources at {str(dir)!r}', color='yellow')
+			log(f'{stderr.decode()}')
+			return
+
+		linestart = 2 # past leading './'
+		newest_file = reffile
+		for i in range(len(stdout)):
+			if stdout[i] == 0x0A:
+				fn = stdout[linestart:i].decode()
+				st = (dir / fn).lstat()
+				if st.st_mtime_ns > self.src_mtime:
+					newest_file = fn
+					self.src_mtime = st.st_mtime_ns
+				linestart = i + 3 # past '\n./'
+
+		return newest_file
+
+
+	async def resolve_sources(self, archs: Seq[str]):
+		if self.src_resolved:
+			return
+		self.src_resolved = True
+		timing = Timing().start(f"resolve sources of {self}")
+
+		# check if package ignores all files, e.g. "IGNORE ."
+		ignore = self.get_directive('IGNORE')
+		if ignore and '.' in ignore and self.eval_ignore_cond('.', ignore.get('.'), archs):
+			# ignore all files except index file (e.g. Makefile)
+			newest_file = self.indexfile
+		else:
+			# scan package source dir for changed files
+			if VERBOSE > 1:
+				log(f'{self}: checking sources in {str(self.dir)!r}')
+			newest_file = await self.find_sources(self.dir, self.indexfile, archs, ignore)
+
+		# scan any extra dirs and files marked with CHECK directives
+		extra_sources = self.get_directive('CHECK')
+		if extra_sources:
+			for filename in extra_sources:
+				if filename.startswith('/'):
+					# "absolute" path is really relative to srcroot
+					path = SRCROOT / filename.lstrip('/')
+					filename_to_log = str(path)
+				else:
+					# relative path is relative to pkg dir
+					path = self.dir / filename
+					filename_to_log = filename
+				st = path.lstat()
+				if VERBOSE > 1:
+					log(f'{self}: CHECK {str(path)!r}')
+				if stat.S_ISDIR(st.st_mode):
+					reffile = str(self.dir / newest_file)
+					newest_file = await self.find_sources(path, reffile, archs, None)
+				elif st.st_mtime_ns > self.src_mtime:
+					newest_file = filename_to_log
+					self.src_mtime = st.st_mtime_ns
+
+		if VERBOSE > 2:
+			log(f'{self}: newest source file: {newest_file} ({self.src_mtime})')
+
+		timing.end()
+
+
+	def check_cond_OR(self, depname: str, cond: Conditional, archs: Seq[str]) -> bool:
+		# logical OR on arch, ie. if condition passes any arch, then it passes
+		for arch in archs:
+			ok = cond.eval(ARCH=arch)
+			if VERBOSE > 2:
+				snippet = f"{depname} {cond.pysrc}"
+				log(f'{self}: eval({TARGET_ARCH}) {snippet!r} => {ok!r}')
+			if ok:
+				return True
+		# none passed
+		return False
+
+
+	def _load_dep(self, depname: str, deppath: list[(Pkg,str)], arch: str) -> Pkg:
+		dep_pkg = load_dependency_pkg(depname, deppath)
+		if (dep_pkg, arch) in deppath:
+			deppath_s = '\n  '.join([f"{pkg.name} ({arch})" \
+			                         for pkg, arch in deppath] + \
+			                         [f"{depname} ({arch})"])
+			raise PkgCyclicDepError(f'Cyclic dependency graph:\n  {deppath_s}')
+		return dep_pkg
+
+
+	def _resolve_deps(self,
+	                  deps: list[PkgDep],
+	                  deppath: list[(Pkg,str)],
+	                  arch: str,
+	                  cond_ARCH: str,
+	                  archdep_archs: set[str]|None,
+	                  depinfomap: dict[str,dict[str,tuple[str]]]):
+
+		archs = archdep_archs if archdep_archs else (arch,)
+		if archdep_archs:
+			archs = archdep_archs
+		elif cond_ARCH:
+			archs = (cond_ARCH,)
+		else:
+			archs = (arch,)
+
+		for depname in depinfomap.keys():
+			depm = depinfomap[depname]  # set[str]
+			tags = depm.get('tags', tuple()) # set[str]
+
+			cond = depm.get('cond') # Conditional|None
+			if cond and not self.check_cond_OR(depname, cond, archs):
+				continue
+
+			dep_pkg = self._load_dep(depname, deppath, arch)
+
+			if not dep_pkg.deps_resolved:
+				dep_pkg.resolve_deps(deppath, arch, cond_ARCH, archdep_archs)
+
+			if not any(dep_pkg == t[0] for t in deps):
+				deps.append((dep_pkg, tags, cond))
+
+
+	def _resolve_archdeps(self,
+	                      archdeps: list[PkgDep],
+	                      deppath: list[(Pkg,str)],
+	                      arch: str,
+	                      archdep_archs: set[str]|None,
+	                      pkgname_to_info: dict[str,(str,Condition|None)]):
+		for depname, mountpoint_and_cond in pkgname_to_info.items():
+			mountpoint, cond = mountpoint_and_cond
+			if cond and not self.check_cond_OR(f"{depname} {arch}", cond, archdep_archs):
+				continue
+
+			dep_pkg = self._load_dep(depname, deppath, arch)
+
+			if not dep_pkg.deps_resolved:
+				dep_pkg.resolve_deps(deppath, arch, "", archdep_archs)
+
+			if not any(dep_pkg == t[0] for t in archdeps):
+				archdeps.append((dep_pkg, mountpoint, cond))
+
+
+	def resolve_deps(self,
+	                 deppath: list[(Pkg,str)],
+	                 arch: str,
+	                 cond_ARCH: str = "",
+	                 archdep_archs: set[str]|None = None):
+		assert self.deps_resolved == False
+		self.deps_resolved = True
+		deppath.append((self, arch))
+
+		m = self.get_directive('DEPENDS')
+		if m:
+			self._resolve_deps(self.deps, deppath, arch, cond_ARCH, archdep_archs, m)
+
+		m = self.get_directive('BUILDTOOL')
+		if m:
+			cond_ARCH = TARGET_ARCH
+			self._resolve_deps(self.hostdeps, deppath, NATIVE_ARCH, cond_ARCH, archdep_archs, m)
+
+		m = self.get_directive('ARCHDEPENDS')
+		if m:
+			archdep_archs = set(m)
+			for arch, pkgname_to_info in m.items():
+				archdeps = self.archdeps.setdefault(arch, [])
+				self._resolve_archdeps(archdeps, deppath, arch, archdep_archs, pkgname_to_info)
+
+		deppath.pop()
+
+
+	def build_dir(self, arch: str) -> Path:
+		builddir_name = f"{self.name}.{arch}"
+		is_toplevel	= self.is_toplevel and arch == TARGET_ARCH
+		if is_toplevel and BUILD_CONFIG_ID:
+			builddir_name += "-" + BUILD_CONFIG_ID
+		return BUILDDIR / builddir_name
+
+
+#——————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+class PkgBuild:
+	pkg:           Pkg
+	arch:          str
+	name:          str
+	deps:          [PkgBuildDep]
+	hostdeps:      [PkgBuildDep]
+	archdeps:      [PkgBuildArchDep] # [(b: PkgBuild, mountpoint: str)]
+	needed_by:     dict[PkgBuild,list[str]]
+	must_build:    bool = False # True if this must unconditionally be (re)built
+	is_toplevel:   bool = False
+	build_mtime:   int = 0      # mtime of build stamp (0 if missing)
+	src_mtime:     int = 0
+	build_dir:     Path
+	build_log:     Path
+	build_stamp:   Path
+	checksum:      str
+	dep_checksums: dict[str,str]
+
+	_cached_ordered_deps: Seq[PkgBuild]|None = None
+
+
+	def __init__(self, pkg: Pkg, arch: str):
+		self.pkg = pkg
+		self.arch = arch
+		self.name = f"{self.pkg.name}.{self.arch}"
+		self.deps = []
+		self.hostdeps = []
+		self.archdeps = []
+		self.needed_by = {}
+		self.checksum = ''
+		self.dep_checksums = {}
+		self.src_mtime = pkg.src_mtime
+
+		if pkg.is_toplevel and arch == TARGET_ARCH:
+			self.is_toplevel = True
+
+		self.build_dir = self.pkg.build_dir(self.arch)
+
+		if self.is_toplevel and RULE:
+			self.build_log = self.build_dir / f'build-{RULE}.log'
+			self.build_stamp = self.build_dir / f'stamp-{RULE}'
+		else:
+			self.build_log = self.build_dir / 'build.log'
+			self.build_stamp = self.build_dir / 'stamp'
+
+
+	def __str__(self):
+		return self.name
+
+
+	def __repr__(self):
+		return f'PkgBuild({self.pkg.name!r}, {self.arch!r})'
+
+
+	def mtime(self) -> int:
+		if self.src_mtime > self.build_mtime:
+			return self.src_mtime
+		return self.build_mtime
+
+
+	def distroot(self) -> Path:
+		return self.build_dir / 'out' / 'distroot'
+
+
+	def ordered_deps(self) -> Seq[PkgBuild]:
+		if self._cached_ordered_deps is None:
+			self._cached_ordered_deps = []
+			seen = set()
+			for t in self.deps + self.hostdeps + self.archdeps:
+				b = t[0]
+				if b not in seen:
+					seen.add(b)
+					self._cached_ordered_deps.append(b)
+		return self._cached_ordered_deps
+
+
+	def sorted_deps(self) -> Seq[PkgBuild]:
+		return sorted(set(self.ordered_deps()), key=lambda x: str(x))
+
+
+	def tansitive_deps(self) -> Seq[PkgBuild]:
+		deps = []
+		seen = set()
+		def visit(b: PkgBuild):
+			if b in seen:
+				return
+			seen.add(b)
+			for dep, tags in b.deps:
+				if 'transitive' in tags:
+					visit(dep)
+					deps.append(dep)
+		visit(self)
+		return deps
+
+
+	def write_build_stamp(self):
+		assert self.checksum != ''
+		if VERBOSE > 2:
+			log(f'writing {self.build_stamp}')
+		self.build_stamp.parent.mkdir(parents=True, exist_ok=True)
+		with self.build_stamp.open('w') as f:
+			f.write(f"{self.checksum}\n")
+			for dep in self.sorted_deps():
+				checksum = dep.checksum
+				if not checksum:
+					log(f"{self}: warning:", f"dep {dep} is missing checksum", color='yellow')
+					checksum = '0'
+				f.write(f"{dep} {checksum}\n")
+		self.build_mtime = self.build_stamp.stat().st_mtime_ns
+
+
+	def read_build_stamp(self):
+		self.dep_checksums.clear()
+		try:
+			st = self.build_stamp.stat()
+			self.build_mtime = st.st_mtime_ns
+			if VERBOSE > 2:
+				log(f'{self}: stamp mtime {st.st_mtime_ns}')
+			with self.build_stamp.open('r') as f:
+				lineno = 1
+				self.checksum = f.readline().rstrip()
+				for line in f:
+					lineno += 1
+					line = line.rstrip()
+					t = line.split(None, 1)
+					if len(t) == 2:
+						dep_name, dep_checksum = t
+						self.dep_checksums[dep_name] = dep_checksum
+					else:
+						log(f"{self}: warning:",
+						    f"{self.build_stamp}:{lineno}: invalid entry: {line!r} (ignored)",
+						    color='yellow')
+		except FileNotFoundError:
+			# missing build stamp; will need to rebuild
+			if VERBOSE > 2:
+				log(f'{self}: stamp not found: {str(self.build_stamp)!r}')
+			self.must_build = True
+
+
+	def check_dep_changed(self, dep: PkgBuild, base_mtime: int) -> bool:
+		if dep.must_build or dep.mtime() <= 0:
+			# print(f">> {self}: dep changed: {dep} (A)")
+			return True
+
+		if base_mtime > 0:
+			dep_mtime = dep.mtime()
+			if VERBOSE > 2:
+				log(f'{self}: mtime cmp {base_mtime} < {dep_mtime} ({dep})')
+			if dep_mtime > base_mtime or dep_mtime <= 0 or dep.must_build:
+				if VERBOSE > 2:
+					log(f"{self}: dep {dep} mtime: {base_mtime} <> {dep_mtime}")
+				# print(f">> {self}: dep changed: {dep} (B)")
+				return True
+
+		if not dep.checksum:
+			if VERBOSE > 2:
+				log(f"{self}: dep {dep} checksum missing")
+			# print(f">> {self}: dep changed: {dep} (C)")
+			return True
+
+		dep_checksum = self.dep_checksums.get(str(dep))
+		if not dep_checksum or dep_checksum != dep.checksum:
+			if VERBOSE > 2:
+				if dep_checksum:
+					log(f"{self}: dep {dep} checksum diff: {dep.checksum} != {dep_checksum}")
+				else:
+					log(f"{self}: dep {dep} checksum diff: {dep.checksum} != (unknown)")
+			# print(f">> {self}: dep changed: {dep} (D)")
+			return True
+
+		if VERBOSE > 2:
+			log(f"{self}: dep {dep} checksum eq: {dep.checksum}")
+
+		return False
+
+
+	def check_needs_build(self, eager: bool) -> (bool, str):
+		if SKIP_DEPS and not self.is_toplevel:
+			return False, '--skip-deps'
+
+		if self.build_mtime < self.src_mtime:
+			if self.build_mtime == 0:
+				if CLEAN_ALL:
+					return True, '--clean-all'
+				if self.is_toplevel and CLEAN:
+					return True, '--clean'
+				if self.is_toplevel and FORCE:
+					return True, '--force'
+				elif self.is_toplevel and INTERACTIVE_SHELL:
+					return True, '--interactive-shell'
+				elif self.is_toplevel and SHELL_CMD:
+					return True, '--shell-cmd'
+				else:
+					return True, 'output missing'
+			else:
+				return True, 'sources changed'
+
+		if not self.checksum:
+			return True, 'checksum missing'
+
+		if self.must_build:
+			return True, ''
+
+		if CLEAN and (self.is_toplevel or CLEAN_ALL):
+			return True, '--clean'
+
+		base_mtime = self.build_mtime if eager else 0
+		# for dep in self.ordered_deps():
+		# 	if self.check_dep_changed(dep, base_mtime):
+		# 		return True, f'dependency {dep} changed'
+		# return False, ''
+		def check_deps(b: PkgBuild) -> (bool, str):
+			for dep in b.ordered_deps():
+				if b.check_dep_changed(dep, base_mtime):
+					return True, f'dependency {dep} changed'
+				if len(dep.deps) > 0:
+					is_newer, reason = check_deps(dep)
+					if is_newer:
+						return is_newer, reason
+			return False, ''
+		return check_deps(self)
+
+
+	async def runLoggedCmd(self, cmd: [str], cwd: str, env) -> bool:
+		if VERBOSE > 1:
+			log(f'{self}: running command in sandbox at {str(cwd)!r}: {fmt_exec_args(cmd)}')
+			if VERBOSE > 2:
+				envstr = ''.join(f"\n  {k}={v}" for k, v in env.items())
+				log(f"with env:{envstr}")
+
+		if DRYRUN:
+			return True
+		elif SHOW_BUILD_OUTPUT and (self.is_toplevel or VERBOSE > 2):
+			if statusline:
+				statusline.end("")
+			return run_logged_cmd_echo(self.build_log, cmd, cwd, env)
+		elif VERBOSE and (COLORS_STDOUT or STDOUT_IS_TTY):
+			if statusline:
+				return await run_logged_cmd_fwd(self.build_log, cmd, cwd, env, statusline)
+			else:
+				return await run_logged_cmd_progress(self.build_log, cmd, cwd, env)
+		else:
+			return await run_logged_cmd_quiet(self.build_log, cmd, cwd, env)
+
+
+	async def runMake(self, cmd: [str], cwd: str, rule: str,
+	                  defines: dict[str,str], env) -> bool:
+		cmd = list(cmd) # make a local copy which we can modify
+		if JOBS > 1:
+			cmd.append(f'-j{JOBS}')
+		if self.pkg.indexfile != 'Makefile':
+			cmd.append(f'-f{self.pkg.indexfile}')
+		# if CLEAN and self.is_toplevel:
+		# 	# avoid checking if build products are up to date; assume all needs to be built
+		# 	cmd.append('--always-make')
+		if self.arch:
+			cmd.append('ARCH=' + self.arch)
+		if self.is_toplevel:
+			for k, v in TOPLEVEL_DEFINES.items():
+				cmd.append(f"{k}={v}")
+		if defines:
+			for k, v in defines.items():
+				cmd.append(f"{k}={v}")
+		if rule:
+			cmd.append(rule)
+		if VERBOSE > 1:
+			log(f"{self}: make" + (f" {rule}" if rule else ''))
+		return await self.runLoggedCmd(cmd, cwd, env)
+
+
+	def setupDistrootDirCopy(self) -> Path:
+		# Must copy to avoid situation where we try to use both foo/out and
+		# foo/out/distroot as lower layers in overlayfs (which is not permitted.)
+		dstpath = self.build_dir / "_out_distroot"
+		if not dstpath.exists():
+			srcpath = self.distroot()
+			if VERBOSE > 2: log(f"COPY {srcpath}/ -> {dstpath}/")
+			# Note: cp is much faster than python shutil.copytree
+			srcpath_sh = str(srcpath).replace("'", "\\'")
+			dstpath_sh = str(dstpath).replace("'", "\\'")
+			subprocess.run(f"cp -a '{srcpath_sh}' '{dstpath_sh}'", shell=True, check=True)
+		return dstpath
+
+
+	def checkDepDirExist(self, dep: PkgBuild, dir: Path):
+		if dep.pkg.is_metapackage() or os.path.exists(dir):
+			return
+		if SKIP_DEPS:
+			buildcmd = f"pbuild {dep.pkg}"
+			if dep.arch != NATIVE_ARCH:
+				buildcmd += f" --arch={dep.arch}"
+			if dep.build_stamp.exists():
+				# messed up fs state
+				buildcmd += f" --clean"
+			msg = f"{self}: missing output of dependency {dep}." + \
+			      f"\nRun pbuild without --skip-deps or build {dep.pkg} with {buildcmd!r}."
+		else:
+			msg = f'{self}: missing output directory {str(dir)!r} of dependency {dep.pkg}'
+		raise FileNotFoundError(msg)
+
+
+	def setupArchdepLayers(self, defer) -> Seq[(str,str)]: # (host_dir, mountpoint)
+		seen = set()
+
+		# First we group archdeps by mountpoint.
+		# PkgBuild.archdeps: [(PkgBuild, mountpoint: str)]
+		mountpoints = {} # { mountpoint: [PkgBuild] }
+		for dep, mountpoint in self.archdeps:
+			mountpoints.setdefault(mountpoint, []).append(dep)
+
+		def visit_dep(dirs: list[str], b: PkgBuild, parent: PkgBuild):
+			dir = str(b.distroot())
+			if dir not in seen:
+				for dep, tags in b.deps:
+					if 'transitive' in tags:
+						visit_dep(dirs, dep, b)
+				seen.add(dir)
+				if not b.pkg.is_metapackage():
+					dirs.append(dir)
+					parent.checkDepDirExist(b, dir)
+
+		# create an overlayfs for each mountpoint
+		archdepdir = self.build_dir / "archdep"
+		defer(rmtree, archdepdir)
+
+		for mountpoint_verbatim, deps in mountpoints.items():
+			# Note: scan_directives checks that mountpoint starts with "/".
+			# Normalize mountpoint strings to have no leading or trailing slashes:
+			mountpoint = mountpoint_verbatim.strip('/')
+			lowerdirs = []
+			for dep in deps:
+				visit_dep(lowerdirs, dep, self)
+			if not lowerdirs:
+				continue
+			# Note: overlayfs lowerdirs order: [top, middle, bottom], so we use reversed
+			mntdir = archdepdir / mountpoint / "mnt"
+			if len(lowerdirs) == 1:
+				# overlayfs requires at least two directories.
+				# The implementation of OverlayFS will work around this using a bind mount,
+				# but that does not work in our case since lowerdirs[0] (the source dir) may
+				# be involved in another overlayfs, which would cause mounting to fail with
+				# a "Resource busy" error
+				upperdir = archdepdir / mountpoint / "out"
+				workdir = archdepdir / mountpoint / "overlayfs"
+				overlayfs = OverlayFS(reversed(lowerdirs), mntdir, upperdir, workdir)
+				defer(rmdir, upperdir, ignore_errors=True, silent=True)
+				if VERBOSE > 2:
+					log(f"mounting {mountpoint_verbatim} on {lowerdirs[0]}")
+			else:
+				overlayfs = OverlayFS(reversed(lowerdirs), mntdir)
+				if VERBOSE > 2:
+					log(f"mounting {mountpoint_verbatim} as overlay" + \
+					    f" with {len(lowerdirs)} layers: (top to bottom)")
+					for i, dir in enumerate(reversed(lowerdirs)):
+						log(" %2d %s" % (i+1, dir))
+			overlayfs.deleteMountpointAfterUnmount = True
+			overlayfs.mount()
+			defer(overlayfs.unmount)
+			yield str(mntdir), mountpoint
+
+
+	def depLayerDirs(self) -> Seq[str]:
+		dirs = []
+		seen = set()
+
+		def add_dir(dep: PkgBuild, dir: str, visitor):
+			for dep2, tags2 in dep.deps:
+				if 'transitive' in tags2:
+					visitor(dep2, tags2)
+			if dir in seen:
+				return
+			seen.add(dir)
+			if not dep.pkg.is_metapackage():
+				dirs.append(dir)
+				self.checkDepDirExist(dep, dir)
+
+		def visit_dep(dep: PkgBuild, tags: Tags):
+			dir = str(dep.build_dir / "out")
+			add_dir(dep, dir, visit_dep)
+
+		def visit_hostdep(dep: PkgBuild, tags: Tags):
+			dir = str(dep.build_dir / "out")
+			if not dep.pkg.is_metapackage() and dir in dirs:
+				# Must copy to avoid situation where we try to use both foo/out and
+				# foo/out/distroot as lower layers in overlayfs (which is not permitted.)
+				self.checkDepDirExist(dep, dir)
+				dir = str(dep.setupDistrootDirCopy())
+			else:
+				dir = dir + "/distroot"
+				self.checkDepDirExist(dep, dir)
+			add_dir(dep, dir, visit_hostdep)
+
+		for dep, tags in self.deps:
+			visit_dep(dep, tags)
+
+		deps_end_index = len(dirs)
+
+		for dep, tags in self.hostdeps:
+			visit_hostdep(dep, tags)
+
+		dirs = dirs[deps_end_index:] + dirs[:deps_end_index]
+		# print('dirs\n  ' + '\n  '.join(dirs))
+		return dirs
+
+
+	def cleanup(self):
+		with Timing().start(f"cleanup package {self}"):
+			if VERBOSE:
+				log(f"{self}: cleaning up build state")
+			builddir = self.build_dir
+
+			rmfile(builddir / 'build.log', ignore_errors=True)
+
+			procs = []
+			rm_args = "-rfv" if VERBOSE > 2 else "-rf"
+
+			for subdir in ('mnt', 'overlayfs', 'p.overlayfs', 'p'):
+				procs.append(subprocess.Popen(["/bin/rm", rm_args, builddir / subdir]))
+
+			outdir = builddir / 'out'
+			destdir = outdir / 'distroot'
+			assert str(destdir) == str(self.distroot())
+
+			if HERMETIC and self.pkg.has_directive('BOOTSTRAP'):
+				# remove all in {outdir}/ except {outdir}/distroot
+				outdir_str = str(outdir)
+				destdir_str = str(destdir)
+				pdir_str = str(outdir / 'p')
+				with os.scandir(outdir_str) as it:
+					for entry in it:
+						if entry.is_dir():
+							if entry.path == pdir_str:
+								# be extra careful with /p, only delete if empty
+								rmdir(entry.path, ignore_errors=True)
+							if entry.path != destdir_str:
+								procs.append(subprocess.Popen(["/bin/rm", rm_args, entry.path]))
+						else:
+							rmfile(entry.path, ignore_errors=True)
+			else:
+				for subdir in EXPORT_SUBDIRS_TO_IGNORE:
+					procs.append(subprocess.Popen(["/bin/rm", rm_args, destdir / subdir]))
+
+			for proc in procs:
+				proc.wait()
+
+
+	def getSandboxEnv(self, SRCDIR: str, **kwargs) -> dict[str,str]:
+		builddir = '/build'
+		shareddir = builddir + '/shared'
+		downloaddir = shareddir + '/download'
+		ltocachedir = shareddir + '/lto-cache'
+		destdir = '/distroot'
+
+		CPPFLAGS = [
+			f'--target={self.arch}-playbit',
+		]
+		CFLAGS = [
+			f'--target={self.arch}-playbit',
+			'-g',
+			'-fPIC',
+		]
+		LDFLAGS = [
+			f'--target={self.arch}-playbit',
+			'-Wl,--thinlto-cache-dir=' + ltocachedir,
+		]
+		if not (self.is_toplevel and DEBUG):
+			CFLAGS += ['-O2', '-DNDEBUG', '-flto=thin']
+		ASFLAGS = CFLAGS
+		CXXFLAGS = CFLAGS
+
+		match self.arch:
+			case 'wasm32':
+				CHOST = f"{self.arch}-unknown-wasi"
+			case _:
+				CHOST = f"{self.arch}-unknown-linux-musl"
+				LDFLAGS.append('-Wl,--compress-debug-sections=zlib')
+
+		env = {
+			"PATH": "/p/tools/bin:/sbin:/bin",
+			"HOME": "/home/root",
+			"USER": "root",
+			"TERM": os.environ.get("TERM", "vt100"),
+			"PBUILD_CHROOT": "1",
+			"PBUILD_PKG": self.pkg.name,
+			"PBUILD_ARCH": self.arch,
+			"ARCH": self.arch,
+			"NATIVE_ARCH": NATIVE_ARCH,
+			"SRCDIR": str(SRCDIR),
+			"DESTDIR": destdir,
+			"DISTROOT": destdir,
+			"BUILDDIR": builddir + '/' + Path(self.pkg.name).name,
+			"DOWNLOAD": downloaddir,
+			"MAXJOBS": str(JOBS),
+			"NJOBS": str(JOBS),
+			"CC": "clang",
+			"CXX": "clang++",
+			"LD": "wasm-ld" if self.arch.startswith('wasm') else "ld.lld",
+			"ASFLAGS": ' '.join([shlex.quote(s) for s in ASFLAGS]),
+			"CPPFLAGS": ' '.join([shlex.quote(s) for s in CPPFLAGS]),
+			"CFLAGS": ' '.join([shlex.quote(s) for s in CFLAGS]),
+			"CXXFLAGS": ' '.join([shlex.quote(s) for s in CXXFLAGS]),
+			"LDFLAGS": ' '.join([shlex.quote(s) for s in LDFLAGS]),
+			"CBUILD": f"{NATIVE_ARCH}-unknown-linux-musl",
+			"CHOST": CHOST,
+			"LTOCACHEDIR": ltocachedir,
+			"PBUILD_ENABLE_TESTS": "1" if ENABLE_TESTS else "",
+		}
+
+		# add ENV directives from dependencies
+		seen = set()
+		def visit_dep(b: PkgBuild):
+			if b.pkg in seen:
+				return
+			seen.add(b.pkg)
+			for dep, tags in b.deps:
+				visit_dep(dep)
+			m = b.pkg.get_directive('ENV')
+			if m:
+				for k, v in m.items():
+					v = v.replace(r'${DESTDIR}', '/distroot')
+					v = v.replace(r'${PATH}', env['PATH'])
+					v = v.replace(r'${HOME}', env['HOME'])
+					env[k] = v
+					if VERBOSE > 2:
+						log(f"{self}: setting ENV from {b.pkg}: {k}={v}")
+		for dep, tags in self.deps:
+			visit_dep(dep)
+		for dep, tags in self.hostdeps:
+			visit_dep(dep)
+
+		if self.is_toplevel:
+			for k, v in TOPLEVEL_DEFINES.items():
+				env[k] = v
+
+		for k, v in kwargs.items():
+			if isinstance(v, bool):
+				if v:
+					env[str(k)] = '1'
+			else:
+				env[str(k)] = str(v)
+
+		return env
+
+
+	def write_dep_status_file(self, filename: Path):
+		# Writes a text file with dependency status on each line with the format:
+		#   status name.arch prev_checksum curr_checksum
+		# Examples:
+		#   A all/alice.aarch64 - 967babee58a70ba0f801
+		#   M bar/bob.aarch64 8648467f721a9d8b7a2a 8d39fadf1d3680572504
+		#   D cat/cari.aarch64 b4428025cf804b264748 -
+		#   - day/dan.aarch64 3d639efc03934901f1de 3d639efc03934901f1de
+		mkdirs(filename.parent)
+		with filename.open('w') as f:
+			current_depnames = set()
+			for dep in self.sorted_deps():
+				current_depnames.add(str(dep))
+				prev_checksum = self.dep_checksums.get(str(dep))
+				if not prev_checksum:
+					status = 'A'
+					prev_checksum = '-'
+				elif prev_checksum != dep.checksum:
+					status = 'M'
+				else:
+					status = '-'
+				depname = str(dep)
+				f.write(f"{status} {depname} {prev_checksum} {dep.checksum}\n")
+			for depname, prev_checksum in self.dep_checksums.items():
+				if depname not in current_depnames:
+					f.write(f"D {depname} {prev_checksum} -\n")
+
+
+	async def buildInSandbox(self, rule: str) -> bool:
+		builddir = self.build_dir
+
+		if CLEAN and (self.is_toplevel or CLEAN_ALL) and builddir.exists():
+			if VERBOSE > 1:
+				log(f"{self}: cleaning out build directory {str(builddir)!r}")
+			rmtree(builddir, verbose=VERBOSE > 2)
+
+		outdir = builddir / "out"
+
+		if VERBOSE > 1:
+			log(f'{self}: using build dir {builddir}')
+
+		mountpoint = builddir / "mnt"
+		lowerdirs = [] # lowerdirs order: bottom middle top
+		overlayfs = None
+
+		destdir = '/distroot'
+		out_distroot = outdir / destdir[1:]
+		mkdirs(out_distroot)
+		mkdirs(mountpoint)
+
+		self.write_dep_status_file(outdir / 'build' / 'pbuild_deps')
+
+		with Deferred() as defer:
+			# Add "bootstrap" layer at the bottom
+			if HERMETIC and self.pkg.has_directive('BOOTSTRAP'):
+				bootstrapdir = setup_bootstrap_dir()
+				if VERBOSE > 1:
+					log(f"{self}: using boostrap dir {bootstrapdir}")
+				lowerdirs.append(str(bootstrapdir))
+			else:
+				if not HERMETIC:
+					lowerdirs.append('/')
+				baselayerdir = setup_baselayer_dir()
+				if VERBOSE > 1:
+					log(f"{self}: using baselayer dir {baselayerdir}")
+				lowerdirs.append(str(baselayerdir))
+
+			# add each dependency as a layer
+			try:
+				lowerdirs.extend(self.depLayerDirs())
+			except FileNotFoundError as e:
+				log(str(e))
+				return False
+
+			# add layer on top with "whiteout" entries, masking non-exported files
+			# from lower layers
+			lowerdirs.append(str(setup_whiteout_dir()))
+
+			# print layers
+			if VERBOSE > 2 and lowerdirs:
+				log(f"mounting / as overlay with {len(lowerdirs)} layers: (top to bottom)")
+				for i, dir in enumerate(reversed(lowerdirs)):
+					log(" %2d %s" % (i+1, dir))
+
+			# configure overlayfs
+			if lowerdirs:
+				workdir = builddir / "overlayfs"
+				# overlayfs needs order: top middle bottom
+				lowerdirs_rev = reversed(lowerdirs)
+				overlayfs = OverlayFS(lowerdirs_rev, mountpoint, outdir, workdir)
+				overlayfs.deleteMountpointAfterUnmount = True
+				overlayfs.mount()
+				defer(overlayfs.unmount)
+
+			# mount SRCROOT at /p, as an overlay on SRCROOT to allow changes to be captured
+			mntdir_p = str(mountpoint / "p")
+			outdir_p = builddir / "p"
+			workdir_p = builddir / "p.overlayfs"
+			overlayfs = OverlayFS([SRCROOT], mntdir_p, outdir_p, workdir_p)
+			overlayfs.deleteMountpointAfterUnmount = True
+			overlayfs.mount()
+			# when done, remove builddir/{srcroot} if empty
+			defer(rmdir, outdir_p, ignore_errors=True, silent=True)
+			defer(overlayfs.unmount)
+
+			# setup bind mounts to host
+			for dir in ('dev', 'proc', 'sys'):
+				mntdir = mountpoint / dir
+				mkdirs(mntdir)
+				libc_mount("/" + dir, mntdir, flags=libc_MS_BIND)
+				defer(unmount_and_rmdir, mntdir)
+
+			# setup archdep layers, which we bind mount
+			if self.archdeps:
+				for hostdir, sandboxdir in self.setupArchdepLayers(defer):
+					# Note: sandboxdir is relative to "/" inside sandbox
+					mntdir = mountpoint / sandboxdir
+					if not mntdir.is_dir() or mntdir.is_symlink():
+						try:
+							mntdir.unlink(missing_ok=True)
+						except:
+							pass
+						mkdirs(mntdir)
+					libc_mount(hostdir, mntdir, flags=libc_MS_BIND|libc_MS_RDONLY)
+					defer(unmount_and_rmdir, mntdir)
+
+			# setup bind mount of shared data at /build/shared
+			mntdir = str(mountpoint / 'build/shared')
+			shareddir = BUILDDIR / "_pbuild.shared"
+			mkdirs(shareddir / "download")
+			mkdirs(mntdir)
+			libc_mount(shareddir, mntdir, flags=libc_MS_BIND)
+			defer(unmount_and_rmdir, mntdir)
+
+			# setup tmpfs mount
+			for dir in ('tmp',):
+				(mountpoint / dir).mkdir(parents=True, exist_ok=True)
+				mntdir = str(mountpoint / dir)
+				libc_mount("tmpfs", mntdir, fs="tmpfs")
+				defer(unmount_and_rmdir, mntdir)
+
+			# HACK for cross compilation: fix symlinks at /sysroot/{arch}
+			if self.arch != NATIVE_ARCH:
+				mountpoint_sysroot = mountpoint / 'sysroot'
+				if mountpoint_sysroot.is_dir():
+					for arch in VALID_ARCHS:
+						if arch != self.arch:
+							rmfile(mountpoint_sysroot / arch, ignore_errors=True)
+					# ln -s .. /sysroot/NATIVE_ARCH
+					symlink('..', mountpoint_sysroot / NATIVE_ARCH, force=True)
+
+			# is_shell_cmd is true if we are running a shell command or an interactive session
+			is_shell_cmd = self.is_toplevel and (INTERACTIVE_SHELL or SHELL_CMD)
+
+			cwd = str(self.pkg.dir)
+
+			# Note: SRCROOT is mounted at /p in sandbox
+			sandbox_cwd = Path('/p') / self.pkg.name
+			sandbox_cwd_shesc = str(sandbox_cwd).replace("'", "\\'")
+
+			env = self.getSandboxEnv(sandbox_cwd,
+				PBUILD_STDOUT_ISTTY = STDOUT_IS_TTY and is_shell_cmd,
+			)
+
+			chroot_cmd = [ CHROOT, str(mountpoint), "/bin/sh", "-c" ]
+			chroot_script = f"cd '{sandbox_cwd_shesc}'"
+
+			if self.pkg.indexfile == 'pbuild.sh':
+				script_shesc = str(sandbox_cwd / self.pkg.indexfile).replace("'", "\\'")
+				if VERBOSE > 2 and not is_shell_cmd:
+					pbuild_sh_script = f"/bin/sh -e -o pipefail -x '{script_shesc}'"
+				else:
+					pbuild_sh_script = f"/bin/sh -e -o pipefail '{script_shesc}'"
+			else:
+				pbuild_sh_script = ''
+
+			if INTERACTIVE_SHELL and self.is_toplevel:
+				if VERBOSE:
+					log(f"{self}: entering interactive shell in sandbox", color='bold')
+					if VERBOSE > 1:
+						log(f"  Changes to /p are recorded at {outdir_p}")
+						log(f"  Changes to /  are recorded at {outdir}")
+
+				if self.pkg.indexfile == 'pbuild.sh':
+					# allow simply typing "pbuild.sh" to run pbuild.sh
+					exe_path = mountpoint / 'bin' / 'pbuild.sh'
+					with exe_path.open('w') as f:
+						f.write("\n".join([
+							"#!/bin/sh",
+							"echo \"cd $SRCDIR && " + pbuild_sh_script.replace('$', '\\$') + '"',
+							"cd $SRCDIR && exec " + pbuild_sh_script,
+						]))
+					exe_path.chmod(0o755)
+					if VERBOSE:
+						log(f"Type pbuild.sh to run {pbuild_sh_script}")
+
+				env['PS1'] = "\\x1B[1;35m(chroot) \\W \\$\\x1B[0m "
+				chroot_cmd += [ f"{chroot_script}; exec sh" ]
+				if VERBOSE > 2:
+					log(f"exec {chroot_cmd}")
+				p = subprocess.run(chroot_cmd, env=env)
+				if VERBOSE:
+					if VERBOSE > 2:
+						log(f"{self}: shell exited with status {p.returncode}")
+					log(f"Output in {outdir}")
+				if p.returncode != 0:
+					return False
+			elif SHELL_CMD and self.is_toplevel:
+				chroot_cmd += [ f"{chroot_script}; {SHELL_CMD}" ]
+				if VERBOSE > 2:
+					log(f"exec {chroot_cmd}")
+					envstr = ''.join(f"\n  {k}={v}" for k, v in env)
+					log(f"with env:{envstr}")
+				p = subprocess.run(chroot_cmd, env=env)
+				global exit_status
+				exit_status = p.returncode
+				if exit_status != 0:
+					return False
+			elif self.pkg.indexfile in ('pbuild.mk', 'Makefile'):
+				chroot_cmd += [ f"{chroot_script} && exec \"$@\"", "-", "make" ]
+				defines = { 'DESTDIR': destdir }
+				if not await self.runMake(chroot_cmd, cwd, rule, defines, env):
+					return False
+			else:
+				# with open(mountpoint / 'tmp/pbuild.sh', 'w') as fdst:
+				# 	fdst.write(f"cd '{sandbox_cwd_shesc}'\n")
+				# 	with open(self.pkg.dir / self.pkg.indexfile, 'r') as fsrc:
+				# 		shutil.copyfileobj(fsrc, fdst)
+				# chroot_cmd += ["/bin/sh", "-e", "-o", "pipefail", "/tmp/pbuild.sh"]
+				chroot_cmd += [ f"{chroot_script} && exec {pbuild_sh_script}" ]
+				if not await self.runLoggedCmd(chroot_cmd, cwd, env):
+					return False
+
+			if VERBOSE > 2:
+				log(f"{self}: cleaning up temporary files")
+
+		# Note: do the following actions _outside_ deferred to make sure filesystems
+		# are not mounted
+
+		# remove any potential old distroot copy
+		out_distroot = self.build_dir / "_out_distroot"
+		if out_distroot.exists():
+			if VERBOSE > 2: log(f"rm -rf {out_distroot}")
+			rmtree(out_distroot)
+
+		# Remove any "opaque directory" attributes from upper overlayfs dir.
+		# This is important, otherwise we might get hard-to-debug errors when files from
+		# dependencies are missing.
+		# See kernel.org/doc/html/v6.10/filesystems/overlayfs.html#whiteouts-and-opaque-directories
+		clear_xattrs_from_tree(outdir / 'distroot', 'trusted.overlay.opaque')
+
+		if CLEANUP:
+			self.cleanup()
+
+		return True
+
+
+	def updateChecksum(self):
+		if self.pkg.is_metapackage():
+			# the checksum of a metapackage is the sum of its dependencies' checksums
+			h = hashlib.sha256()
+			for dep in self.sorted_deps():
+				h.update(f'{dep}:{dep.checksum}.'.encode('utf8'))
+			self.checksum = h.digest().hex()
+		else:
+			with Timing().start(f"checksum output of {self}"):
+				self.checksum = checksum_dir(self.distroot())
+		if VERBOSE > 1:
+			log(f"{self}: checksum {self.checksum}")
+
+
+	def markAsBuilt(self) -> bool:
+		if (INTERACTIVE_SHELL or SHELL_CMD) and self.is_toplevel:
+			# don't mark package as "built" after interactive session ends
+			if VERBOSE > 1:
+				if SHELL_CMD:
+					log(f'{self}: note: NOT stamping as built (--shell-cmd)')
+				else:
+					log(f'{self}: note: NOT stamping as built (--interactive-shell)')
+			return True
+
+		self.updateChecksum()
+		self.write_build_stamp()
+		self.must_build = False
+		return True
+
+
+	def onBuildSuccess(self, extra_info: str):
+		if VERBOSE > 1 or (VERBOSE and self.is_toplevel) or statusline:
+			disk_usage = ''
+			distroot = self.distroot()
+			if not self.pkg.is_metapackage() and distroot.is_dir():
+				disk_usage = ' ' + get_disk_usage(distroot)
+			if VERBOSE > 1:
+				kind = "metapackage " if self.pkg.is_metapackage() else ""
+				if extra_info: extra_info = " " + extra_info
+				log(f'{self}: {kind}OK', f"{distroot}{disk_usage}{extra_info}", color='green')
+			else:
+				if statusline:
+					statusline.update(ansi_style("OK", "green") + f" {distroot}{disk_usage}")
+				else:
+					log("OK", f"{distroot}{disk_usage}", color='green')
+
+
+	def onBuildFail(self, is_last: bool):
+		if INTERACTIVE_SHELL and self.is_toplevel:
+			if VERBOSE and not is_last:
+				log(f'{self}: shell exited with non-zero status; stopping')
+		elif SHELL_CMD and self.is_toplevel:
+			if VERBOSE and not is_last:
+				suffix = '' if is_last else '; stopping'
+				log(f'{self}: shell command exited with non-zero status{suffix}')
+		else:
+			if statusline:
+				statusline.update(ansi_style('failed', 'red'))
+			else:
+				log(f'{self}: failed', color='red')
+			if self.build_log.exists():
+				if not (SHOW_BUILD_OUTPUT and (self.is_toplevel or VERBOSE > 2)):
+					log(f'Last 20 lines of {self.build_log}:')
+					log_horizontal_line()
+					p = subprocess.run(["/usr/bin/tail", "-n20", str(self.build_log)],
+					                   capture_output=True)
+					log(p.stdout.decode('utf8').strip())
+
+
+	async def build(self, rule: str, reason: str, is_last: bool) -> bool:
+		if VERBOSE:
+			verb = 'building'
+			if not ((CLEAN and self.is_toplevel) or CLEAN_ALL) and self.build_stamp.exists():
+				verb = 'rebuilding'
+
+
+		maybe_a_statusline = NoOpCtxManager()
+		if VERBOSE == 1:
+			DEPRECATED = self.pkg.get_directive('DEPRECATED')
+			if DEPRECATED:
+				for msg in DEPRECATED:
+					log(f'{self.pkg}: DEPRECATED: {msg}', color='yellow')
+			is_interactive = self.is_toplevel and (INTERACTIVE_SHELL or SHELL_CMD)
+			if COLORS_STDOUT and not is_interactive:
+				package = ansi_style(str(self), 'bold')
+				maybe_a_statusline = StatusLine(f"{verb} {package}: ")
+		with maybe_a_statusline:
+
+			if not DRYRUN:
+				needs_build, reason2 = self.check_needs_build(eager=False)
+				if not needs_build:
+					if VERBOSE > 1 or (self.is_toplevel and VERBOSE):
+						if statusline:
+							statusline.update(f"up-to-date (rebuilding deps had no effect)")
+						else:
+							log(f"{self}: up-to-date (rebuilding deps had no effect)")
+					self.build_stamp.touch()
+					if not statusline:
+						self.onBuildSuccess("")
+					return True
+
+			if VERBOSE:
+				if statusline:
+					statusline.update('...')
+				elif self.is_toplevel:
+					if not (INTERACTIVE_SHELL or SHELL_CMD):
+						log(f'{verb} {self}', f'-> {self.build_dir}/out/distroot', color='bold')
+				else:
+					in_str = f' in {self.build_dir}' if VERBOSE > 1 else ''
+					reason = f' ({reason})' if reason and VERBOSE > 1 else ''
+					# Note: needed_by: dict[PkgBuild,list[str]]
+					if VERBOSE > 1 or len(self.needed_by) == 1:
+						needed_by = ", ".join([str(dep) for dep in self.needed_by])
+					else:
+						needed_by = f"{next(iter(self.needed_by))} +{len(self.needed_by)-1}"
+					log(f'{verb} {self}{in_str}', f'needed by {needed_by}{reason}', color='bold')
+
+			if DRYRUN:
+				return True
+
+			if self.pkg.is_metapackage():
+				if not self.markAsBuilt():
+					return False
+				self.onBuildSuccess("")
+				return True
+
+			with Timing().start(f"build package {self}") as tim:
+				ok = await self.buildInSandbox(rule)
+				if ok:
+					ok = self.markAsBuilt()
+				if ok:
+					extra_info = ""
+					if VERBOSE > 1:
+						duration = time.perf_counter_ns() - tim.start_time
+						extra_info = fmt_duration(duration, short=True)
+					self.onBuildSuccess(extra_info)
+				else:
+					self.onBuildFail(is_last)
+
+			return ok
+
+
+#——————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+def relpath(path: str|Path) -> str:
+	cwd = str(Path.cwd()) + '/'
+	p = str(path)
+	if p.startswith(cwd):
+		return p[len(cwd):]
+	return p
+
+
+def touch(path: Path):
+	while True:
+		try:
+			path.touch()
+			break
+		except FileNotFoundError:
+			path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def scan_directive(filename: Path, lineno: int, directives: dict, key: str, value: str):
+	requires_value = True
+	match key:
+		case 'DEP' | 'DEPENDS' | 'BUILDTOOL':
+			# package name followed by zero or more "[tag]", optionally followed
+			# by python snippet conditional. E.g.
+			#   DEPENDS foo
+			#   DEPENDS bar [transitive]
+			#   DEPENDS cat [transitive] if ARCH == 'wasm32'
+			#   DEPENDS zoo if ARCH == 'wasm32'
+			if key == 'DEP':
+				key = 'DEPENDS'
+			entries = directives.setdefault(key, {})
+			v = value.split(None, 1)
+			depm = entries.setdefault(v[0], dict())
+			tags = depm.setdefault('tags', set())
+			if len(v) > 1:
+				condidx = v[1].find(' if ')
+				if condidx < 0 and v[1].startswith('if '):
+					condidx = 0
+				if condidx >= 0:
+					pysrc = v[1][condidx:].strip()
+					depm['cond'] = Conditional(filename, lineno, pysrc)
+					v[1] = v[1][:condidx]
+				for tag in v[1].strip().split():
+					tags.add(tag.strip('[]').replace('run', 'transitive'))
+		case 'ARCHDEPENDS' | 'ARCHDEP':
+			# "pkg arch mountpoint [condition]"
+			# mapped as { arch: { pkgname: (mountpoint, cond|None) } }
+			if key == 'ARCHDEP':
+				key = 'ARCHDEPENDS'
+			entries = directives.setdefault(key, {})
+			v = value.split(None, 3)
+			if len(v) < 3:
+				raise PkgMetaSyntaxError(
+					f'{filename}:{lineno}: invalid syntax for directive {key}; ' + \
+					'expecting: pkg arch mountpoint [cond]')
+			pkgname = v[0]
+			arch = v[1]
+			mountpoint = v[2]
+			cond = Conditional(filename, lineno, v[3]) if len(v) > 3 else None
+			if arch not in VALID_ARCHS:
+				raise PkgMetaSyntaxError(
+					f'{filename}:{lineno}: invalid arch {arch!r} in {key} entry')
+			entries2 = entries.setdefault(arch, {})
+			if pkgname in entries2:
+				raise PkgMetaSyntaxError(
+					f'{filename}:{lineno}: duplicate {key} entry: ' + \
+					f'{pkgname} declared twice for arch {arch}')
+			if not mountpoint.startswith('/'):
+				raise PkgMetaSyntaxError(
+					f'{filename}:{lineno}: mountpoint {mountpoint!r}' + \
+					' does not begin with "/"')
+			entries2[pkgname] = (mountpoint, cond)
+		case 'IGNORE':
+			# "filename [condition]"
+			entries = directives.setdefault(key, {})
+			v = value.split(None, 1)
+			path = v[0]
+			if len(v) > 1:
+				entries[path] = Conditional(filename, lineno, v[1])
+			else:
+				entries[path] = None
+		case 'ENV':
+			# "key=value"
+			v = value.split('=', 1)
+			if len(v) == 1:
+				raise PkgMetaSyntaxError(
+					f'{filename}:{lineno}: missing =value in {key} directive')
+			directives.setdefault(key, {})[v[0]] = v[1]
+		case 'CHECK':
+			# list of filenames
+			entries = directives.setdefault(key, set())
+			entries.update(value.split())
+		case 'METAPACKAGE' | 'BOOTSTRAP':
+			# boolean
+			directives[key] = True
+			requires_value = False
+		case 'DEPRECATED':
+			# message
+			entries = directives.setdefault(key, [])
+			entries.append(value)
+		case _:
+			# some unknown directive
+			log(f'{filename}:{lineno}: warning: unknown directive: {key}', color='yellow')
+			requires_value = False
+
+	if requires_value and len(value) == 0:
+		raise PkgMetaSyntaxError(f'{filename}:{lineno}: missing value for directive {key}')
+
+
+def scan_directives(filename: Path) -> dict[str,str]:
+	directives = {}
+	lineno = 0
+	with open(filename, 'r') as fp:
+		for line in fp:
+			lineno += 1
+
+			# skip empty lines
+			if len(line) == 0:
+				continue
+
+			# stop on first line which is not empty and not a comment
+			if line[0] != '#':
+				if len(line.strip()) == 0:
+					# line with stray whitespace; skip it
+					continue
+				break
+
+			# skip lines which do not begin with "#!"
+			if line[0:2] != '#!':
+				continue
+
+			# split line into 'key' after first space, rest as 'value'
+			kv = line[2:].strip().split(' ', 1)
+			key = kv[0].upper()
+			value = kv[1].lstrip() if len(kv) > 1 else ''
+			requires_value = True
+
+			scan_directive(filename, lineno, directives, key, value)
+
+	return directives
+
+
+def find_pkg_indexfile(dir: Path) -> (str, os.stat_result | None):
+	for indexfile in INDEXFILES:
+		try:
+			fn = dir / indexfile
+			indexfile_st = fn.stat()
+			return indexfile, indexfile_st
+		except:
+			pass
+	return '', None
+
+
+def load_pkg(pkgdir: Path,
+             is_toplevel: bool,
+             deppath: Seq[(Pkg,str)]|None=None,
+             pkgpath: str='') -> Pkg:
+	assert pkgdir.is_absolute()
+
+	if pkgdir == SRCROOT:
+		pkgname = "_root"
+	else:
+		# pkgname is stem of srcroot, e.g. SRCROOT=/a/b dir=/a/b/c/d pkgname=c/d
+		srcroot = str(SRCROOT) + '/'
+		dir_str = str(pkgdir)
+		assert dir_str.startswith(srcroot)
+		pkgname = dir_str[len(srcroot):]
+
+	pkg = pkgindex.get(pkgname)
+	if pkg:
+		return pkg
+
+	if VERBOSE > 2:
+		log(f'{pkgname}: using source directory {str(pkgdir)!r}')
+
+	indexfile, indexfile_st = find_pkg_indexfile(pkgdir)
+	if indexfile_st:
+		pkg = Pkg(pkgname, pkgdir, indexfile, indexfile_st, is_toplevel)
+		pkgindex[pkgname] = pkg
+		return pkg
+
+	# error: not found
+	if pkgdir.exists():
+		if pkgdir.is_dir():
+			indexfiles = ', '.join(INDEXFILES)
+			reason = f'missing index file; looked for {indexfiles}'
+		else:
+			reason = f'{str(pkgdir)!r} is not a directory'
+	else:
+		reason = f'{str(pkgdir)!r} does not exist'
+
+	if not pkgpath:
+		pkgpath = pkgname
+
+	if deppath:
+		deppath_s = '\nDependency stack:\n  ' + \
+		            '\n  '.join(reversed([f"{pkg.name} ({arch})" \
+		                                  for pkg, arch in deppath] + [pkgpath]))
+	else:
+		deppath_s = ''
+
+	if pkgdir == SRCROOT:
+		pkgpath = '.'
+	raise PkgNotFound(f'{pkgpath!r} is not a package: ({reason}){deppath_s}')
+
+
+def load_dependency_pkg(pkgpath: str, deppath: Seq[(Pkg,str)]) -> Pkg:
+	assert len(deppath) > 0
+	if pkgpath.startswith('./'):
+		# pkgpath is relative to the package that refers to it
+		pkgdir = deppath[-1][0].dir / pkgpath
+	else:
+		# pkgpath is based in SRCROOT (practically absolute)
+		pkgdir = SRCROOT / pkgpath
+	return load_pkg(pkgdir, is_toplevel=False, deppath=deppath, pkgpath=pkgpath)
+
+
+def resolve_deps(top_level_pkgs: [Pkg]) -> [Pkg]:
+	deppath = []
+	timing = Timing()
+	for pkg in top_level_pkgs:
+		if not pkg.deps_resolved:
+			with timing.restart(f"resolve dependencies of {pkg}"):
+				pkg.resolve_deps(deppath, TARGET_ARCH)
+
+
+# resolve_builds creates dependency trees that match pkgs but for specific target archs.
+# Return a list of builds to be performed in order (topologically ordered by dependencies.)
+def resolve_builds(top_level_pkgs: [Pkg]) -> [PkgBuild]:
+	buildlist = []
+	processed = dict()
+
+	def intern_pkgbuild(pkg: Pkg, arch: str) -> (bool, PkgBuild):
+		key = (pkg, arch)
+		b = processed.get(key)
+		if b:
+			return (False, b)
+		b = PkgBuild(pkg, arch)
+		processed[key] = b
+		return (True, b)
+
+	def visit_dep(pkg: Pkg, arch: str) -> PkgBuild:
+		newfound, b = intern_pkgbuild(pkg, arch)
+		if newfound:
+			for dep_pkg, tags, cond in pkg.hostdeps:
+				if not cond or cond.eval(arch):
+					dep_b = visit_dep(dep_pkg, NATIVE_ARCH)
+					b.hostdeps.append((dep_b, tags))
+					dep_b.needed_by.setdefault(b, []).append('BUILDTOOL')
+				elif VERBOSE > 2:
+					log(f"{b}: skipping BUILDTOOL {dep_pkg}" + \
+					    f" because condition {cond.pysrc!r} did not pass")
+			for dep_pkg, tags, cond in pkg.deps:
+				if not cond or cond.eval(arch):
+					dep_b = visit_dep(dep_pkg, arch)
+					b.deps.append((dep_b, tags))
+					dep_b.needed_by.setdefault(b, []).append('DEPENDS')
+				elif VERBOSE > 2:
+					log(f"{b}: skipping DEPENDS {dep_pkg}" + \
+					    f" because condition {cond.pysrc!r} did not pass")
+			for dep_arch, deps in pkg.archdeps.items():
+				for dep_pkg, mountpoint, cond in deps:
+					if not cond or cond.eval(arch):
+						dep_b = visit_dep(dep_pkg, dep_arch)
+						b.archdeps.append((dep_b, mountpoint))
+						dep_b.needed_by.setdefault(b, []).append('ARCHDEPENDS')
+					elif VERBOSE > 2:
+						log(f"{b}: skipping ARCHDEPENDS {dep_pkg}" + \
+						    f" because condition {cond.pysrc!r} did not pass")
+			buildlist.append(b)
+		return b
+
+	for pkg in top_level_pkgs:
+		visit_dep(pkg, TARGET_ARCH)
+
+	if VERBOSE > 2:
+		log(f'packages sorted by dependencies:')
+		if TARGET_ARCH != NATIVE_ARCH or VERBOSE > 2:
+			namelen = 0
+			for b in buildlist:
+				n = len(b.pkg.name)
+				if n > namelen:
+					namelen = n
+			for b in buildlist:
+				log('  %-*s %s' % (namelen, b.pkg.name, b.arch))
+		else:
+			for b in buildlist:
+				log(f'  {b.pkg.name}')
+
+		log(f'dependency tree:', color='bold')
+		for b in buildlist:
+			log(f'  {b}', color='teal')
+			log(f'    makedepends =',
+			    ', '.join(f"{dep}" + (f"[{','.join(tags)}]" if tags else '') \
+			                for dep, tags in b.hostdeps))
+			log(f'    deps =',
+			    ', '.join(f"{dep}" + (f"[{','.join(tags)}]" if tags else '') \
+			                for dep, tags in b.deps))
+			log(f'    archdepends =',
+			    ', '.join(f"{dep}:{mountpoint}" for dep, mountpoint in b.archdeps))
+
+	return buildlist
+
+
+async def resolve_sources(buildlist: [PkgBuild]):
+	pkgs_to_check = set()
+	archs = set()
+	for b in buildlist:
+		b.read_build_stamp()
+
+		if b.pkg.is_metapackage():
+			if VERBOSE > 2: log(f'{b}: metapackage')
+			if b.build_mtime > b.src_mtime:
+				b.src_mtime = b.build_mtime
+			continue
+
+		if b.pkg.is_toplevel and (FORCE or INTERACTIVE_SHELL or SHELL_CMD):
+			b.must_build = True
+			continue
+
+		if b.must_build or not b.checksum:
+			continue
+
+		if b.build_mtime < b.src_mtime:
+			b.must_build = True
+		else:
+			# We assume a dependency is up-to-date if --skip-deps option is set.
+			# Note: we do this check here instead of in the buildlist loop above to avoid
+			# logging the same package twice.
+			if SKIP_DEPS and not b.pkg.is_toplevel:
+				if VERBOSE > 2:
+					log(f'{b.pkg}: not checking sources (--skip-deps)')
+			else:
+				pkgs_to_check.add(b.pkg)
+				archs.add(b.arch)
+
+	if not pkgs_to_check:
+		return
+
+	archs = tuple(archs)
+
+	if VERBOSE == 1 and COLORS_STDOUT:
+		ntotalstr = str(len(pkgs_to_check))
+		nw = len(ntotalstr)
+		n = 0
+		with StatusLine(f"checking sources {n:{nw}d}/{ntotalstr}") as sl:
+			async def wrapper(pkg):
+				nonlocal n
+				await pkg.resolve_sources(archs)
+				n += 1
+				sl.set_prefix(f"checking sources {n:{nw}d}/{ntotalstr}: ")
+				sl.update(f"{pkg}")
+			await asyncio.gather(*(wrapper(pkg) for pkg in pkgs_to_check))
+			return
+
+	if VERBOSE:
+		maybe_a_statusline = NoOpCtxManager()
+		msg = f'checking sources of {plural(len(pkgs_to_check), "package")}'
+		if not SKIP_DEPS:
+			msg += ' (--skip-deps to skip)'
+		log(msg)
+
+	await asyncio.gather(*(pkg.resolve_sources(archs) for pkg in pkgs_to_check))
+	# async with asyncio.TaskGroup() as tg:
+	# 	for pkg in pkgs_to_check:
+	# 		tg.create_task(pkg.resolve_sources(archs))
+
+
+def select_what_to_build(buildlist: [PkgBuild], cleanup_only: [PkgBuild]) -> [(PkgBuild, str)]:
+	buildlist2 = []
+	for b in buildlist:
+		needs_rebuild, reason = b.check_needs_build(eager=True)
+		if needs_rebuild:
+			buildlist2.append((b, reason))
+		else:
+			if CLEANUP and b.pkg.is_toplevel and b.arch == TARGET_ARCH:
+				cleanup_only.append(b)
+			if VERBOSE > 1 or (VERBOSE > 0 and b.pkg.is_toplevel and b.arch == TARGET_ARCH):
+				if not SKIP_DEPS or b.pkg.is_toplevel:
+					log(f'{b}: {reason if reason else "up-to-date"}',
+					    f"{b.build_dir}/out/distroot",
+					    color='bold')
+				# else: don't log anything; confusing to say "up-to-date" when we didn't
+				# actually check if it is up to date, i.e. when --skip-deps is set.
+	return buildlist2
+
+
+def print_buildlist(buildlist: [(PkgBuild,str)]):
+	s = 's' if len(buildlist) != 1 else ''
+	log(f"building {len(buildlist)} package{s}:")
+	headers = ('PACKAGE', 'ARCH', 'REASON')
+	rows = [(b.pkg.name, b.arch, reason if reason else 'missing') for b, reason in buildlist]
+	log(fmt_table(headers, rows, fancy=COLORS_STDERR, indent='  '))
+
+
+async def build_pkgs(buildlist: [(PkgBuild,str)], rule: str):
+	if not buildlist:
+		return True
+	if VERBOSE > 1:
+		print_buildlist(buildlist)
+	last_i = len(buildlist) - 1
+	for i, build_and_reason in enumerate(buildlist):
+		b, reason = build_and_reason
+		actual_rule = rule if b.pkg.is_toplevel else ''
+		if not await b.build(actual_rule, reason, is_last=i==last_i):
+			return False
+	return True
+
+
+def list_deps(top_level_pkgs: [Pkg], what: str):
+	deplist = []
+	dependency_of = dict()
+	buildtool_for = dict()
+
+	if what and what[0] == 'a':
+		runtime_only = False
+		runtime_only2 = False
+	else:
+		runtime_only = what and what[0] == 'r'
+		runtime_only2 = True
+
+	def visit(pkg: Pkg, runtime_only: bool):
+		if pkg in deplist:
+			return
+		for dep, tags, cond in pkg.deps:
+			if not runtime_only or 'transitive' in tags:
+				dependency_of.setdefault(dep, []).append(pkg)
+				visit(dep, runtime_only2)
+		if not runtime_only:
+			for dep, tags, cond in pkg.hostdeps:
+				buildtool_for.setdefault(dep, []).append(pkg)
+				visit(dep, runtime_only2)
+		deplist.append(pkg)
+
+	for pkg in top_level_pkgs:
+		visit(pkg, runtime_only)
+
+	deplist = list(reversed(deplist))
+
+	if what == 'short':
+		for pkg in deplist:
+			print(pkg)
+		return
+
+	rows = []
+	has_dependants = False
+	has_buildtools = False
+	for pkg in deplist:
+		dependants = dependency_of.get(pkg, [])
+		buildtools = buildtool_for.get(pkg, [])
+		if dependants or buildtools:
+			has_dependants = True
+			dependants = ', '.join(reversed(sorted(dep.name for dep in dependants)))
+			if buildtools:
+				has_buildtools = True
+				buildtools = ', '.join(reversed(sorted(dep.name for dep in buildtools)))
+			else:
+				buildtools = ''
+		else:
+			dependants = ''
+			buildtools = ''
+		rows.append((pkg.name, dependants, buildtools))
+	headers = ['PACKAGE']
+	if has_dependants: headers.append('DEPENDENCY OF')
+	if has_buildtools: headers.append('BUILDTOOL FOR')
+
+	print(fmt_table(headers, rows))
+
+
+def fmt_table(headers: Seq[str], rows: Seq[Seq[str]], fancy: bool|None=None, indent: str='') -> str:
+	assert len(headers) > 0
+
+	if fancy is None:
+		fancy = COLORS_STDOUT
+
+	maxcols = term_cols(default=0xffffffff)
+	if len(indent) < maxcols:
+		maxcols -= len(indent)
+
+	vline = '│' if fancy else '|'
+
+	# expand TABs in rows
+	rows2 = list(rows)
+	for i, row in enumerate(rows):
+		rows2[i] = [row[y].expandtabs(4) for y in range(len(headers))]
+	rows = rows2
+
+	last_i = len(headers) - 1
+	widths = [0] * len(headers)
+	currw = 0
+	overflows = False
+	wrapper = list(headers)
+	for i, header in enumerate(headers):
+		w = len(header)
+		for row in rows:
+			row_w = len(row[i])
+			if row_w > w:
+				w = row_w
+		if i == 0:
+			# FIRSTCOL | ...
+			#         ~
+			sepw = 1
+		elif i < last_i:
+			# | MIDCOL | ...
+			# ~~      ~
+			sepw = 3
+		else:
+			# | LASTCOL
+			# ~~
+			sepw = 2
+
+		if i == last_i:
+			maxw = (maxcols - currw) - sepw
+		else:
+			maxw_per_col = (maxcols - currw) // (len(headers) - i)
+			maxw = maxw_per_col - sepw
+		if w > maxw:
+			overflows = True
+			w = maxw
+		widths[i] = w
+		currw += w + sepw
+		wrapper[i] = TextWrapper(width=w, expand_tabs=False)
+
+	heights = [1] * (1 + len(rows))
+	headers = list(headers) # make a local copy that we can modify
+	if overflows:
+		maxh = 1
+		for i in range(len(headers)):
+			headers[i] = wrapper[i].wrap(headers[i])
+			nlines = len(headers[i])
+			if nlines > maxh:
+				maxh = nlines
+		heights[0] = maxh
+		for ri, row in enumerate(rows):
+			maxh = 1
+			for i in range(len(headers)):
+				row[i] = wrapper[i].wrap(row[i])
+				nlines = len(row[i])
+				if nlines > maxh:
+					maxh = nlines
+			heights[ri + 1] = maxh
+	else:
+		# convert earch cell into a seq since we expect that later on
+		for i in range(len(headers)):
+			headers[i] = (headers[i],)
+		for ri, row in enumerate(rows):
+			for i in range(len(headers)):
+				row[i] = (row[i],)
+
+	out = []
+
+	def fmt_cell(i: int, line: str):
+		# line = lines[0] if len(lines) > 0 else ''
+		if i == 0:
+			out.append('%-*s' % (widths[i], line))
+		elif i < last_i:
+			out.append(' %s %-*s' % (vline, widths[i], line))
+		else:
+			out.append(' %s %s' % (vline, line))
+
+	out.append(indent)
+	if fancy: out.append('\033[1m')
+	for lineidx in range(heights[0]):
+		if lineidx > 0:
+			out.append('\0')
+		for i, row in enumerate(headers):
+			lines = row
+			line = lines[lineidx] if len(lines) > lineidx else ''
+			fmt_cell(i, line)
+	if fancy: out.append('\033[0m')
+
+	for rowidx, row in enumerate(rows):
+		for lineidx in range(heights[rowidx + 1]):
+			out.append('\n')
+			out.append(indent)
+			for i in range(len(headers)):
+				lines = row[i]
+				line = lines[lineidx] if len(lines) > lineidx else ''
+				fmt_cell(i, line)
+
+	return ''.join(out)
+
+
+def fmt_exec_args(args: [str]) -> str:
+	def r(v):
+		s = repr(v)
+		s2 = s[1:-1]
+		if '\\' not in s and "'" not in s2:
+			return s2
+		return s
+	return ' '.join([r(a) for a in args])
+
+
+def configure_BUILD_CONFIG_ID(args):
+	global BUILD_CONFIG_ID
+	if len(TOPLEVEL_DEFINES) == 0:
+		BUILD_CONFIG_ID = ''
+		return
+	defines = TOPLEVEL_DEFINES
+
+	# detect some common defines and use symbolic names
+	if defines.get('DEBUG', '') == '1':
+		BUILD_CONFIG_ID = 'debug'
+		defines = defines.copy()
+	elif defines.get('RELEASE', '') == '1':
+		BUILD_CONFIG_ID = 'release'
+		defines = defines.copy()
+
+	KEYS_EXCLUDED_FROM_HASH = (
+		"DEBUG",
+		"RELEASE",
+		"V",
+	)
+	keys = sorted(k for k in defines if k not in KEYS_EXCLUDED_FROM_HASH)
+	if keys:
+		cfghash = hashlib.sha256()
+		for k in keys:
+			cfghash.update((f'-D{k}={defines[k]}').encode('utf8'))
+		if BUILD_CONFIG_ID:
+			BUILD_CONFIG_ID += '-'
+		BUILD_CONFIG_ID += cfghash.digest()[0:8].hex()
+
+
+def resolve_pkgdirs(args: [str]) -> list[Path]:
+	if len(args) == 0:
+		return [Path.cwd()]
+	# Note: use os.path.abspath instead of Path.absolute since os.path.abspath normalizes
+	# the path (ie removes "..", e.g. a/b/../c => a/c), which Path.absolute does not.
+	return [Path(os.path.abspath(arg)) for arg in args]
+
+
+def find_srcroot(pkgdir: Path):
+	# note: use os.path.abspath instead of Path.absolute since os.path.abspath
+	# normalizes the path (ie removes "..", e.g. a/b/../c => a/c) which Path.absolute
+	# does not.
+	dir = pkgdir
+	root = Path('/')
+	while dir != root:
+		if (dir / '.git').is_dir():
+			return dir
+		dir = dir.parent
+	dir = pkgdir
+	while dir != root:
+		if (dir / '.pbuild').is_file():
+			return dir
+		dir = dir.parent
+	log(f"Can not infer SRCROOT of {str(pkgdir)!r}")
+	sys.exit(1)
+
+
+def install_pkg(b :PkgBuild, dstdir: str):
+	if b.pkg.is_metapackage():
+		if b.is_toplevel and VERBOSE:
+			log(f"Install {b.pkg}: (Nothing to install for METAPACKAGE)")
+		return
+	with Timing().start(f"install {b}"):
+		srcdir = f"{b.build_dir}/out/distroot"
+		if VERBOSE > 0:
+			if VERBOSE > 1:
+				log(f"Install {b.pkg} ({b.arch}): {srcdir}/… -> {dstdir}/…")
+			else:
+				log(f"Install {b.pkg} at {dstdir}")
+		flags = "-udRT"
+		if VERBOSE > 1:
+			flags += "v"
+		cmd = ["/bin/cp", flags, srcdir, dstdir]
+		if VERBOSE > 1:
+			log(f'[--dry-run] exec: {fmt_exec_args(cmd)}')
+		if not DRYRUN:
+			subprocess.run(cmd)
+
+
+def install(buildlist: Seq[PkgBuild], dstdir: str):
+	# noinstall_pkg_names are special packages we never install implicitly.
+	# Note that these can still be installed explicitly, by specifying them on the command line.
+	noinstall_pkg_names = (
+		'src/cc',
+		'src/rootfs',
+		'src/libc',
+		'src/kernel-headers',
+		'ports/busybox',
+	)
+	dstdir = str(Path(dstdir).resolve())
+	seen = set()
+	for b, build_reason in buildlist:
+		if not b.is_toplevel or b in seen:
+			continue
+		seen.add(b)
+		for dep in b.tansitive_deps():
+			if dep in seen:
+				continue
+			seen.add(dep)
+			if dep.pkg.name in noinstall_pkg_names:
+				if VERBOSE > 1:
+					log(f'Skipping installation of "dangerous" dependency {dep.pkg}. ' +
+					    'Specify explicitly to install anyway.')
+				continue
+			install_pkg(dep, dstdir)
+		install_pkg(b, dstdir)
+
+
+def print_pkg_dir(top_level_pkgs: Seq[Pkg], path_suffix: str):
+	for pkg in top_level_pkgs:
+		print(f"{pkg.build_dir(TARGET_ARCH)}/{path_suffix}")
+
+
+def error_incompatible_builddir():
+	builddir_sh = shlex.quote(str(BUILDDIR))
+	log(f"pbuild: error:",
+	    f"Build directory {builddir_sh} is managed by an incompatible version of pbuild",
+	    color='red')
+	if VERBOSE:
+		log(f"Please remove the existing build directory:", f"rm -r {builddir_sh}",
+		    color='bold')
+	sys.exit(1)
+
+
+def init_builddir():
+	state_file = BUILDDIR / '_pbuild.info.txt'
+	if not state_file.exists():
+		mkdirs(BUILDDIR)
+		if VERBOSE > 2:
+			log(f"writing {str(state_file)!r}")
+		with state_file.open('w') as f:
+			f.write(f"{PBUILD_BUILDDIR_VERSION}\n")
+		return
+	# check PBUILD_BUILDDIR_VERSION
+	curr_builddir_version = ''
+	try:
+		with state_file.open('r') as f:
+			curr_builddir_version = f.readline().strip()
+			if VERBOSE > 2:
+				log(f"read BUILDDIR_VERSION from {str(state_file)!r}:" + \
+				    f" {curr_builddir_version} (current={PBUILD_BUILDDIR_VERSION})")
+	except Exception as e:
+		log(f"pbuild: warning:", str(e), color='yellow')
+	if curr_builddir_version != str(PBUILD_BUILDDIR_VERSION):
+		return error_incompatible_builddir()
+
+
+def pbuild_of_playbit_system_src():
+	try:
+		with (PBUILD_DIR.parent / '.git' / 'config').open() as f:
+			return f.read().find('url = git@github.com:playbit/playbit.git') > -1
+	except:
+		return False
+
+
+async def main():
+	parser = argparse.ArgumentParser(description='Build packages')
+	parser.add_argument('pkgs', metavar='<pkg>', type=str, nargs='*',
+	                    help='Package; a directory containing a ' + \
+	                         ' or '.join(INDEXFILES) + ' file. Defaults to current directory.')
+
+	parser.add_argument('-v', '--verbose', action='count',
+	                    help='Log more details. -vv for extra details, -vvv for a lot. Implies -p.')
+	parser.add_argument('-q', '--quiet', action='count',
+	                    help='Only print errors and warnings (overrides -v)')
+	parser.add_argument('-p', '--show-build-output', action='store_true',
+	                    help='Show output from build process for top-level packages. Applies to dependencies as well if verbosity is at least -vv.')
+	parser.add_argument('--no-color', action='store_true',
+	                    help='Do not color output even if outputting to a terminal')
+	parser.add_argument('--color', action='store_true',
+	                    help='Color output even if not outputting to a terminal')
+	parser.add_argument('--timing', action='store_true',
+	                    help='Measure time of builds (implied by -v)')
+
+	parser.add_argument('-s', '--skip-deps', action='store_true',
+	                    help='Assume dependencies are up to date (only consider rebuilding named projects or dependencies which are missing.)')
+	parser.add_argument('-f', '--force', action='store_true',
+	                    help='Build <pkg> even when up to date')
+	parser.add_argument('--clean', action='store_true',
+	                    help='Build <pkg> from scratch')
+	parser.add_argument('--clean-all', action='store_true',
+	                    help='Build <pkg> and all dependencies from scratch')
+	parser.add_argument('--cleanup', action='store_true',
+	                    help="Remove build state after a successful build")
+
+	parser.add_argument('--debug', action='store_true',
+	                    help='Build debug products. Passes DEBUG=1 to make. Only applies to top-level packages.')
+	parser.add_argument('--arch', metavar='<arch>', action='store',
+	                    choices=VALID_ARCHS,
+	                    help=f'Build for achitecture instead of {NATIVE_ARCH}')
+	parser.add_argument('--rule', metavar='<rule>', action='store',
+	                    help='Build specific makefile rule (instead of default)')
+	parser.add_argument('-c', '--shell-cmd', metavar='<script>', action='store',
+	                    help='Run <script> in a shell instead of invoking make or a build script. Useful for debugging sandbox issues. Use -i for interactive mode.')
+	parser.add_argument('-i', '--interactive-shell', action='store_true',
+	                    help='Enter a shell instead of invoking make or a build script. Useful for debugging sandbox issues. Use -c to run a script.')
+	parser.add_argument('-D', metavar='<name>[=<value>]', action='append',
+	                    help='Define <name>, passed to make and set in environment (for top-level packages only)')
+	parser.add_argument('--enable-tests', action='store_true',
+	                    help='Run tests when building')
+
+	parser.add_argument('--install', metavar='<dir>', action='store',
+	                    help='Copy-merge top-level package distroot into <dir> after successful build')
+	parser.add_argument('--dry-run', action='store_true',
+	                    help="Just print what would be done, don't make any modifications")
+	parser.add_argument('--hermetic', nargs='?', metavar='<bool>', const='',
+	                    help="Perform hermetic build (used to build Playbit system)")
+
+	parser.add_argument('--build-dir', metavar='<dir>', action='store',
+	                    help='Use <dir> as build root instead of the default')
+	parser.add_argument('--print-build-dir', action='store_true',
+	                    help="Print pbuild build directory to stdout and exit")
+	parser.add_argument('--print-out-dir', action='store_true',
+	                    help="Print output directory of <pkg>")
+	parser.add_argument('--print-dest-dir', action='store_true',
+	                    help="Print product directory of <pkg>")
+
+	parser.add_argument('-j', '--jobs', metavar='<jobs>', action='store', type=int,
+	                    help='Limit parallelism to <jobs>. Defaults to number of CPUs')
+
+	parser.add_argument('-l', action='store_true',
+	                    help="Print list of dependencies needed by <pkg>")
+	parser.add_argument('--list-deps', nargs='?', metavar='<what>', const='',
+	                    choices=('', 'short', 'run', 'runtime', 'all'),
+	                    help="Print list of dependencies needed by <pkg>. If <what> is 'runtime', only list what is needed to run <pkg>. If <what> is 'all', include transient dependencies. If <what> is 'short', only print a plain list of package names.")
+
+	args = parser.parse_args()
+
+	global COLORS_STDOUT, COLORS_STDERR, STDOUT_IS_TTY, STDERR_IS_TTY
+	STDOUT_IS_TTY = os.isatty(1)
+	STDERR_IS_TTY = os.isatty(2)
+	if not args.no_color:
+		COLORS_STDOUT = (args.color or STDOUT_IS_TTY)
+		COLORS_STDERR = (args.color or STDERR_IS_TTY)
+
+	global CLEANUP
+	CLEANUP = True if args.cleanup else False
+
+	global TARGET_ARCH
+	TARGET_ARCH = args.arch if args.arch else NATIVE_ARCH
+
+	global CHROOT
+	if not PLATFORM_IS_PLAYBIT:
+		CHROOT = '/usr/sbin/chroot'
+
+	global HERMETIC
+	if args.hermetic is not None:
+		HERMETIC = args.hermetic != '' and args.hermetic[0] not in ('f', 'n', '0')
+	elif not PLATFORM_IS_PLAYBIT or pbuild_of_playbit_system_src():
+		HERMETIC = True
+
+	global DRYRUN
+	DRYRUN = True if args.dry_run else False
+
+	global SRCROOT
+	pkgdirs = resolve_pkgdirs(args.pkgs)
+	for i, pkgdir in enumerate(pkgdirs):
+		srcroot = find_srcroot(pkgdir)
+		if i == 0:
+			SRCROOT = srcroot
+		elif srcroot != SRCROOT:
+			# make sure all packages mentioned are rooted in the same project
+			log(f"error: Mixed SRCROOT: {str(SRCROOT)!r}, {str(srcroot)!r}", color='red')
+			sys.exit(1)
+
+	global BUILDDIR
+	if args.build_dir:
+		BUILDDIR = Path(args.build_dir)
+	if args.print_build_dir:
+		print(BUILDDIR)
+		sys.exit(0)
+
+	global VERBOSE
+	if args.verbose:
+		VERBOSE += args.verbose
+	if args.quiet:
+		VERBOSE = 0
+
+	global TIMING
+	if args.timing:
+		TIMING = True
+	timing = Timing()
+	timing_total = Timing().start("total")
+
+	global SHELL_CMD
+	SHELL_CMD = args.shell_cmd if args.shell_cmd else ''
+
+	global INTERACTIVE_SHELL
+	INTERACTIVE_SHELL = True if args.interactive_shell else False
+
+	global ENABLE_TESTS
+	ENABLE_TESTS = True if args.enable_tests else False
+
+	global SHOW_BUILD_OUTPUT
+	if args.show_build_output:
+		SHOW_BUILD_OUTPUT = True
+
+	global TOPLEVEL_DEFINES
+	if args.D:
+		for d in args.D:
+			v = d.split('=', 2)
+			TOPLEVEL_DEFINES[v[0]] = v[1] if len(v) > 1 else ''
+
+	global DEBUG
+	DEBUG = True if args.debug else False
+	if DEBUG and not 'DEBUG' in TOPLEVEL_DEFINES:
+		TOPLEVEL_DEFINES['DEBUG'] = '1'
+
+	global RULE
+	RULE = args.rule if args.rule else ''
+
+	configure_BUILD_CONFIG_ID(args)
+
+	global FORCE
+	FORCE = True if args.force else False
+
+	global CLEAN, CLEAN_ALL
+	global CLEAN_ALL
+	CLEAN_ALL = True if args.clean_all else False
+	CLEAN = True if CLEAN_ALL or args.clean else False
+	if CLEAN: FORCE = True
+
+	global SKIP_DEPS
+	SKIP_DEPS = True if args.skip_deps else False
+	if SKIP_DEPS and CLEAN_ALL:
+		print(f"{sys.argv[0]}: cannot specify both --skip-deps and --clean-all", file=sys.stderr)
+		sys.exit(1)
+
+	global JOBS
+	if args.jobs and args.jobs > 0:
+		JOBS = args.jobs
+	else:
+		# default to 150% of the number of logical CPUs this process has access to
+		JOBS = int(len(os.sched_getaffinity(0)) * 2)
+		if VERBOSE > 2: log(f"limiting parallelism to {JOBS}")
+
+	if VERBOSE > 2:
+		log('SRCROOT          ', SRCROOT)
+		log('BUILDDIR         ', BUILDDIR)
+		log('BUILD_CONFIG_ID  ', BUILD_CONFIG_ID)
+		log('HERMETIC         ', "true" if HERMETIC else "false")
+		log('TOPLEVEL_DEFINES ', repr(TOPLEVEL_DEFINES))
+
+	# simplify -l to --list-deps
+	if args.l:
+		args.list_deps = ''
+
+	if not DRYRUN and not args.list_deps and not args.print_out_dir and not args.print_dest_dir:
+		init_builddir()
+
+	global exit_status
+
+	try:
+		timing.restart("resolve packages")
+		top_level_pkgs = []
+		for pkgdir in pkgdirs:
+			pkg = load_pkg(pkgdir, is_toplevel=True)
+			if pkg not in top_level_pkgs:
+				top_level_pkgs.append(pkg)
+
+		if args.print_out_dir:
+			print_pkg_dir(top_level_pkgs, 'out')
+			sys.exit(0)
+		elif args.print_dest_dir:
+			print_pkg_dir(top_level_pkgs, 'out/distroot')
+			sys.exit(0)
+
+		timing.end_and_restart("resolve dependencies")
+
+		try:
+			resolve_deps(top_level_pkgs)
+
+			# --list-deps
+			if args.list_deps is not None:
+				list_deps(top_level_pkgs, args.list_deps)
+				return
+
+			buildlist = resolve_builds(top_level_pkgs)
+
+			with timing.end_and_restart("resolve sources"):
+				if CLEAN_ALL:
+					for b in buildlist:
+						b.must_build = True
+				else:
+					await resolve_sources(buildlist)
+					# update PkgBuild.src_mtime
+					for b in buildlist:
+						b.src_mtime = b.pkg.src_mtime
+
+		except ExceptionGroup as e:
+			if len(e.exceptions) == 1:
+				e = e.exceptions[0]
+			raise e
+
+		cleanup_only = []
+		buildlist = select_what_to_build(buildlist, cleanup_only)
+
+		build_ok = True
+		if buildlist:
+			with timing.restart("build all packages"):
+				build_ok = await build_pkgs(buildlist, args.rule)
+
+		if build_ok and args.install:
+			with timing.restart("install"):
+				install(buildlist, args.install)
+
+		timing.restart("cleanup")
+		if build_ok:
+			for b in cleanup_only:
+				b.cleanup()
+		elif exit_status == 0:
+			exit_status = 1
+
+	except KeyboardInterrupt:
+		return
+	except asyncio.CancelledError:
+		print("cancelled")
+		exit_status = 1
+	except PkgNotFound as e:
+		log(f'{e}')
+		exit_status = 1
+	except PkgCyclicDepError as e:
+		log(f'{e}')
+		exit_status = 1
+
+	finally:
+		rescue_unmount_all_pbuild()
+		timing.end()
+		timing_total.end()
+
+	sys.exit(exit_status)
+
+
+asyncio.run(main())

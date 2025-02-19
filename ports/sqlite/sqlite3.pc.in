@@ -1,0 +1,11 @@
+prefix=/usr
+exec_prefix=${prefix}
+libdir=/
+includedir=${prefix}/include
+
+Name: SQLite
+Description: SQL database engine
+Version: @VERSION@
+Libs: -L${libdir} -lmd4c
+Libs.private: @LIBS@
+Cflags: -I${includedir}

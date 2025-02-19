@@ -1,0 +1,217 @@
+#!BUILDTOOL toolchain
+#!DEP ports/libc
+#!DEP ports/libz [transitive]
+#!DEP ports/libzstd [transitive]
+#
+# Note: libelf (for host) is needed for building the linux kernel.
+# Note: argp-standalone and musl-obstack are only used by upgrade-libelf.sh
+
+include ../../tools/playbit.defs.mk
+
+VERSION := 0.191
+
+PRODUCTS := \
+	lib/libelf.a \
+	lib/pkgconfig/libelf.pc \
+	usr/include/libelf.h \
+	usr/include/gelf.h \
+	usr/include/nlist.h
+
+SRCS := \
+	lib/color.c \
+	lib/crc32.c \
+	lib/crc32_file.c \
+	lib/error.c \
+	lib/next_prime.c \
+	lib/printversion.c \
+	lib/xasprintf.c \
+	lib/xmalloc.c \
+	lib/xstrdup.c \
+	lib/xstrndup.c \
+	\
+	libelf/elf32_checksum.c \
+	libelf/elf32_fsize.c \
+	libelf/elf32_getchdr.c \
+	libelf/elf32_getehdr.c \
+	libelf/elf32_getphdr.c \
+	libelf/elf32_getshdr.c \
+	libelf/elf32_newehdr.c \
+	libelf/elf32_newphdr.c \
+	libelf/elf32_offscn.c \
+	libelf/elf32_updatefile.c \
+	libelf/elf32_updatenull.c \
+	libelf/elf32_xlatetof.c \
+	libelf/elf32_xlatetom.c \
+	libelf/elf64_checksum.c \
+	libelf/elf64_fsize.c \
+	libelf/elf64_getchdr.c \
+	libelf/elf64_getehdr.c \
+	libelf/elf64_getphdr.c \
+	libelf/elf64_getshdr.c \
+	libelf/elf64_newehdr.c \
+	libelf/elf64_newphdr.c \
+	libelf/elf64_offscn.c \
+	libelf/elf64_updatefile.c \
+	libelf/elf64_updatenull.c \
+	libelf/elf64_xlatetof.c \
+	libelf/elf64_xlatetom.c \
+	libelf/elf_begin.c \
+	libelf/elf_clone.c \
+	libelf/elf_cntl.c \
+	libelf/elf_compress.c \
+	libelf/elf_compress_gnu.c \
+	libelf/elf_end.c \
+	libelf/elf_error.c \
+	libelf/elf_fill.c \
+	libelf/elf_flagdata.c \
+	libelf/elf_flagehdr.c \
+	libelf/elf_flagelf.c \
+	libelf/elf_flagphdr.c \
+	libelf/elf_flagscn.c \
+	libelf/elf_flagshdr.c \
+	libelf/elf_getarhdr.c \
+	libelf/elf_getaroff.c \
+	libelf/elf_getarsym.c \
+	libelf/elf_getbase.c \
+	libelf/elf_getdata.c \
+	libelf/elf_getdata_rawchunk.c \
+	libelf/elf_getident.c \
+	libelf/elf_getphdrnum.c \
+	libelf/elf_getscn.c \
+	libelf/elf_getshdrnum.c \
+	libelf/elf_getshdrstrndx.c \
+	libelf/elf_gnu_hash.c \
+	libelf/elf_hash.c \
+	libelf/elf_kind.c \
+	libelf/elf_memory.c \
+	libelf/elf_ndxscn.c \
+	libelf/elf_newdata.c \
+	libelf/elf_newscn.c \
+	libelf/elf_next.c \
+	libelf/elf_nextscn.c \
+	libelf/elf_rand.c \
+	libelf/elf_rawdata.c \
+	libelf/elf_rawfile.c \
+	libelf/elf_readall.c \
+	libelf/elf_scnshndx.c \
+	libelf/elf_strptr.c \
+	libelf/elf_update.c \
+	libelf/elf_version.c \
+	libelf/gelf_checksum.c \
+	libelf/gelf_fsize.c \
+	libelf/gelf_getauxv.c \
+	libelf/gelf_getchdr.c \
+	libelf/gelf_getclass.c \
+	libelf/gelf_getdyn.c \
+	libelf/gelf_getehdr.c \
+	libelf/gelf_getlib.c \
+	libelf/gelf_getmove.c \
+	libelf/gelf_getnote.c \
+	libelf/gelf_getphdr.c \
+	libelf/gelf_getrel.c \
+	libelf/gelf_getrela.c \
+	libelf/gelf_getshdr.c \
+	libelf/gelf_getsym.c \
+	libelf/gelf_getsyminfo.c \
+	libelf/gelf_getsymshndx.c \
+	libelf/gelf_getverdaux.c \
+	libelf/gelf_getverdef.c \
+	libelf/gelf_getvernaux.c \
+	libelf/gelf_getverneed.c \
+	libelf/gelf_getversym.c \
+	libelf/gelf_newehdr.c \
+	libelf/gelf_newphdr.c \
+	libelf/gelf_offscn.c \
+	libelf/gelf_update_auxv.c \
+	libelf/gelf_update_dyn.c \
+	libelf/gelf_update_ehdr.c \
+	libelf/gelf_update_lib.c \
+	libelf/gelf_update_move.c \
+	libelf/gelf_update_phdr.c \
+	libelf/gelf_update_rel.c \
+	libelf/gelf_update_rela.c \
+	libelf/gelf_update_shdr.c \
+	libelf/gelf_update_sym.c \
+	libelf/gelf_update_syminfo.c \
+	libelf/gelf_update_symshndx.c \
+	libelf/gelf_update_verdaux.c \
+	libelf/gelf_update_verdef.c \
+	libelf/gelf_update_vernaux.c \
+	libelf/gelf_update_verneed.c \
+	libelf/gelf_update_versym.c \
+	libelf/gelf_xlate.c \
+	libelf/gelf_xlatetof.c \
+	libelf/gelf_xlatetom.c \
+	libelf/libelf_crc32.c \
+	libelf/libelf_next_prime.c \
+	libelf/nlist.c
+
+ARGP_SRCS := \
+	argp-standalone/argp-ba.c \
+	argp-standalone/argp-eexst.c \
+	argp-standalone/argp-fmtstream.c \
+	argp-standalone/argp-help.c \
+	argp-standalone/argp-parse.c \
+	argp-standalone/argp-pv.c \
+	argp-standalone/argp-pvh.c \
+	argp-standalone/mempcpy.c \
+	argp-standalone/strchrnul.c
+
+OBSTACK_SRCS := musl-obstack/obstack_printf.c musl-obstack/obstack.c
+
+CFLAGS += \
+	-I. -Ilib -Ilibelf -Iargp-standalone/include -Imusl-obstack/include \
+	-std=gnu99 -fno-addrsig \
+	-Wall \
+	-Wshadow \
+	-Wformat=2 \
+	-Wold-style-definition \
+	-Wstrict-prototypes \
+	-Wnull-dereference \
+	-Wimplicit-fallthrough \
+	-Werror \
+	-Wunused \
+	-Wextra \
+	-DHAVE_CONFIG_H \
+	-D_FORTIFY_SOURCE=3 \
+	-D_GNU_SOURCE
+
+PRODUCTS := $(addprefix $(DESTDIR)/,$(PRODUCTS))
+OBJS := $(addprefix $(BUILDDIR)/,$(patsubst %,%.o,$(SRCS)))
+ARGP_OBJS := $(addprefix $(BUILDDIR)/,$(patsubst %,%.o,$(ARGP_SRCS)))
+OBSTACK_OBJS := $(addprefix $(BUILDDIR)/,$(patsubst %,%.o,$(OBSTACK_SRCS)))
+ALL_OBJS := $(OBJS) $(ARGP_OBJS) $(OBSTACK_OBJS)
+
+all: $(PRODUCTS)
+install: $(PRODUCTS)
+uninstall:
+	$(Q)rm -rf $(PRODUCTS)
+clean:
+	$(Q)rm -rf $(BUILDDIR) $(PRODUCTS)
+argp: $(BUILDDIR)/libargp.a
+obstack: $(BUILDDIR)/libmusl-obstack.a
+
+$(DESTDIR)/lib/libelf.a: $(OBJS)
+$(DESTDIR)/usr/include/%.h: libelf/%.h
+	$(QLOG) INSTALL $@
+	$(Q)install -D -m0644 $< $@
+
+$(BUILDDIR)/libmusl-obstack.a: $(BUILDDIR)/libmusl-obstack.prelink.o
+$(OBSTACK_OBJS): override CFLAGS := \
+	$(TARGET_FLAGS) -O2 -g -Imusl-obstack -DHAVE_CONFIG_H
+$(BUILDDIR)/libmusl-obstack.prelink.o: $(OBSTACK_OBJS)
+
+$(BUILDDIR)/libargp.a: $(BUILDDIR)/libargp.prelink.o
+$(ARGP_OBJS): override CFLAGS := \
+	$(TARGET_FLAGS) -std=gnu99 -O2 -g \
+	-Iargp-standalone/include -Iargp-standalone \
+	-Wall -Winvalid-pch -Wno-incompatible-pointer-types-discards-qualifiers \
+	-D_FILE_OFFSET_BITS=64 -DHAVE_CONFIG_H=1 \
+	-D_WASI_EMULATED_GETPID
+$(BUILDDIR)/libargp.prelink.o: $(ARGP_OBJS)
+ifeq ($(ARCH),wasm32)
+$(BUILDDIR)/libargp.prelink.o: PRELINKFLAGS += -lwasi-emulated-getpid
+endif
+
+include ../../tools/playbit.rules.mk
+.PHONY: all clean install uninstall argp obstack

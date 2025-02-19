@@ -1,0 +1,1724 @@
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/Makefile vim90/src/Makefile
+--- vim90_original/src/Makefile	2022-06-28 11:37:17
++++ vim90/src/Makefile	2024-01-25 15:04:33
+@@ -1341,8 +1341,22 @@
+ HAIKUGUI_TESTTARGET = gui
+ HAIKUGUI_BUNDLE =
+ 
++### Playbit GUI
++PLAYBITGUI_SRC	= gui.c gui_playbit.c
++PLAYBITGUI_OBJ	= objects/gui.o objects/gui_playbit.o
++PLAYBITGUI_DEFS	= -DFEAT_GUI_PLAYBIT
++PLAYBITGUI_IPATH	= 
++PLAYBITGUI_LIBS_DIR =  
++PLAYBITGUI_LIBS1	= -lplaybit
++PLAYBITGUI_LIBS2	=
++PLAYBITGUI_INSTALL = install_normal install_gui_extra
++PLAYBITGUI_TARGETS	= installglinks
++PLAYBITGUI_MAN_TARGETS = yes
++PLAYBITGUI_TESTTARGET = gui
++PLAYBITGUI_BUNDLE =
++
+ # All GUI files
+-ALL_GUI_SRC  = gui.c gui_gtk.c gui_gtk_f.c gui_motif.c gui_xmdlg.c gui_xmebw.c gui_gtk_x11.c gui_x11.c gui_haiku.cc
++ALL_GUI_SRC  = gui.c gui_gtk.c gui_gtk_f.c gui_motif.c gui_xmdlg.c gui_xmebw.c gui_gtk_x11.c gui_x11.c gui_haiku.cc gui_playbit.c
+ ALL_GUI_PRO  = gui.pro gui_gtk.pro gui_motif.pro gui_xmdlg.pro gui_gtk_x11.pro gui_x11.pro gui_w32.pro gui_photon.pro
+ 
+ # }}}
+@@ -3281,6 +3295,9 @@
+ objects/gui_motif.o: gui_motif.c
+ 	$(CCC) -o $@ gui_motif.c
+ 
++objects/gui_playbit.o: gui_playbit.c
++	$(CCC) -o $@ gui_playbit.c
++
+ objects/gui_xmdlg.o: gui_xmdlg.c
+ 	$(CCC) -o $@ gui_xmdlg.c
+ 
+@@ -4322,6 +4339,11 @@
+  proto/gui_beval.pro structs.h regexp.h gui.h libvterm/include/vterm.h \
+  libvterm/include/vterm_keycodes.h alloc.h ex_cmds.h spell.h proto.h \
+  globals.h errors.h version.h
++objects/gui_playbit.o: gui_playbit.c vim.h protodef.h auto/config.h feature.h \
++ os_unix.h ascii.h keymap.h termdefs.h macros.h option.h beval.h \
++ proto/gui_beval.pro structs.h regexp.h gui.h libvterm/include/vterm.h \
++ libvterm/include/vterm_keycodes.h alloc.h ex_cmds.h spell.h proto.h \
++ globals.h errors.h version.h auto/osdef.h
+ objects/json_test.o: json_test.c main.c vim.h protodef.h auto/config.h feature.h \
+  os_unix.h auto/osdef.h ascii.h keymap.h termdefs.h macros.h option.h \
+  beval.h proto/gui_beval.pro structs.h regexp.h gui.h \
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/configure.ac vim90/src/configure.ac
+--- vim90_original/src/configure.ac	2022-06-19 17:59:27
++++ vim90/src/configure.ac	2024-01-16 13:53:13
+@@ -2306,7 +2306,7 @@
+ dnl defining FEAT_XFONTSET is delayed, so that it can be disabled for no GUI
+ 
+ test -z "$with_x" && with_x=yes
+-test "${enable_gui-yes}" != no -a "x$MACOS_X" != "xyes" -a "x$QNX" != "xyes" && with_x=yes
++test "${enable_gui-yes}" != no -a "x$MACOS_X" != "xyes" -a "x$QNX" != "xyes" -a "x$enable_gui" != "xplaybit" && with_x=yes
+ if test "$with_x" = no; then
+   AC_MSG_RESULT(defaulting to: don't HAVE_X11)
+ else
+@@ -2442,7 +2442,7 @@
+     AC_MSG_ERROR([could not configure X])
+ fi
+ 
+-test "x$with_x" = xno -a "x$HAIKU" != "xyes" -a "x$MACOS_X" != "xyes" -a "x$QNX" != "xyes" && enable_gui=no
++test "x$with_x" = xno -a "x$HAIKU" != "xyes" -a "x$MACOS_X" != "xyes" -a "x$QNX" != "xyes" -a "x$enable_gui" != "xplaybit" && enable_gui=no
+ 
+ AC_MSG_CHECKING(--enable-gui argument)
+ AC_ARG_ENABLE(gui,
+@@ -2460,6 +2460,7 @@
+ SKIP_MOTIF=YES
+ SKIP_PHOTON=YES
+ SKIP_HAIKU=YES
++SKIP_PLAYBIT=YES
+ GUITYPE=NONE
+ 
+ if test "x$HAIKU" = "xyes"; then
+@@ -2512,6 +2513,8 @@
+ 		SKIP_GTK3=;;
+     motif)	AC_MSG_RESULT(Motif GUI support)
+ 		SKIP_MOTIF=;;
++    playbit)	AC_MSG_RESULT(Playbit GUI support)
++		SKIP_PLAYBIT=;;
+     *)		AC_MSG_RESULT([Sorry, $enable_gui GUI is not supported]) ;;
+   esac
+ 
+@@ -3150,6 +3153,10 @@
+ 
+ if test -z "$SKIP_PHOTON"; then
+   GUITYPE=PHOTONGUI
++fi
++
++if test -z "$SKIP_PLAYBIT"; then
++  GUITYPE=PLAYBITGUI
+ fi
+ 
+ AC_SUBST(GUI_INC_LOC)
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/errors.h vim90/src/errors.h
+--- vim90_original/src/errors.h	2022-06-21 21:15:26
++++ vim90/src/errors.h	2024-01-16 13:53:13
+@@ -550,7 +550,7 @@
+ EXTERN char e_unknown_fontset_str[]
+ 	INIT(= N_("E234: Unknown fontset: %s"));
+ # endif
+-# if defined(FEAT_GUI_X11) || defined(FEAT_GUI_GTK) \
++# if defined(FEAT_GUI_X11) || defined(FEAT_GUI_GTK) || defined(FEAT_GUI_PLAYBIT) \
+ 	|| defined(FEAT_GUI_PHOTON) || defined(FEAT_GUI_MSWIN) || defined(FEAT_GUI_HAIKU)
+ EXTERN char e_unknown_font_str[]
+ 	INIT(= N_("E235: Unknown font: %s"));
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/evalfunc.c vim90/src/evalfunc.c
+--- vim90_original/src/evalfunc.c	2022-06-27 11:45:15
++++ vim90/src/evalfunc.c	2024-01-16 13:53:13
+@@ -5752,6 +5752,13 @@
+ 		0
+ #endif
+ 		},
++	{"gui_playbit",
++#ifdef FEAT_GUI_PLAYBIT
++		1
++#else
++		0
++#endif
++		},
+ 	{"gui_win32",
+ #ifdef FEAT_GUI_MSWIN
+ 		1
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/feature.h vim90/src/feature.h
+--- vim90_original/src/feature.h	2022-05-21 19:39:11
++++ vim90/src/feature.h	2024-07-01 09:39:47
+@@ -507,7 +507,6 @@
+ // #  define FEAT_XFONTSET
+ # endif
+ #endif
+-
+ /*
+  * +libcall		libcall() function
+  */
+@@ -604,7 +603,8 @@
+ #if defined(FEAT_NORMAL)
+ # define FEAT_BROWSE_CMD
+ # if defined(FEAT_GUI_MSWIN) || defined(FEAT_GUI_MOTIF) \
+-	|| defined(FEAT_GUI_GTK) || defined(FEAT_GUI_HAIKU) || defined(FEAT_GUI_PHOTON)
++	|| defined(FEAT_GUI_GTK) || defined(FEAT_GUI_HAIKU) \
++	|| defined(FEAT_GUI_PHOTON) || defined(FEAT_GUI_PLAYBIT)
+ #  define FEAT_BROWSE
+ # endif
+ #endif
+@@ -628,6 +628,7 @@
+ 	|| defined(FEAT_GUI_GTK) \
+ 	|| defined(FEAT_GUI_PHOTON) \
+ 	|| defined(FEAT_GUI_HAIKU) \
++	|| defined(FEAT_GUI_PLAYBIT) \
+ 	|| defined(FEAT_GUI_MSWIN)
+ #  define FEAT_CON_DIALOG
+ #  define FEAT_GUI_DIALOG
+@@ -645,6 +646,7 @@
+ 	(defined(FEAT_GUI_MOTIF) \
+ 	 || defined(FEAT_GUI_GTK) || defined(FEAT_GUI_MSWIN) \
+ 	 || defined(FEAT_GUI_PHOTON) \
++	 || defined(FEAT_GUI_PLAYBIT) \
+ 	 || defined(FEAT_GUI_HAIKU))
+ # define FEAT_GUI_TEXTDIALOG
+ # ifndef ALWAYS_USE_GUI
+@@ -863,7 +865,7 @@
+  * +X11			Unix only.  Include code for xterm title saving and X
+  *			clipboard.  Only works if HAVE_X11 is also defined.
+  */
+-#if defined(FEAT_NORMAL) || defined(FEAT_GUI_MOTIF)
++#if (defined(FEAT_NORMAL) || defined(FEAT_GUI_MOTIF)) && !defined(FEAT_GUI_PLAYBIT)
+ # define WANT_X11
+ #endif
+ 
+@@ -974,7 +976,7 @@
+ /*
+  * +dnd		Drag'n'drop support.  Always used for the GTK+ GUI.
+  */
+-#if defined(FEAT_CLIPBOARD) && defined(FEAT_GUI_GTK)
++#if (defined(FEAT_CLIPBOARD) && defined(FEAT_GUI_GTK)) || defined(FEAT_GUI_PLAYBIT)
+ # define FEAT_DND
+ #endif
+ 
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/fileio.c vim90/src/fileio.c
+--- vim90_original/src/fileio.c	2022-06-08 15:08:03
++++ vim90/src/fileio.c	2024-01-16 13:53:13
+@@ -3456,6 +3456,7 @@
+ #if (defined(FEAT_DND) && defined(FEAT_GUI_GTK)) \
+ 	|| defined(FEAT_GUI_MSWIN) \
+ 	|| defined(FEAT_GUI_HAIKU) \
++	|| defined(FEAT_GUI_PLAYBIT) \
+ 	|| defined(PROTO)
+ /*
+  * Shorten all filenames in "fnames[count]" by current directory.
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/gui.c vim90/src/gui.c
+--- vim90_original/src/gui.c	2022-06-16 18:45:30
++++ vim90/src/gui.c	2024-01-16 13:53:13
+@@ -844,7 +844,7 @@
+ }
+ 
+ #if defined(FEAT_GUI_GTK) || defined(FEAT_GUI_X11) || defined(FEAT_GUI_MSWIN) \
+-	|| defined(FEAT_GUI_PHOTON) || defined(PROTO)
++	|| defined(FEAT_GUI_PLAYBIT) || defined(FEAT_GUI_PHOTON) || defined(PROTO)
+ # define NEED_GUI_UPDATE_SCREEN 1
+ /*
+  * Called when the GUI shell is closed by the user.  If there are no changed
+@@ -5156,7 +5156,7 @@
+ #endif
+ 
+ #if defined(FEAT_GUI_GTK) || defined(FEAT_GUI_X11)|| defined(FEAT_GUI_HAIKU) \
+-	|| defined(PROTO)
++	|| defined(FEAT_GUI_PLAYBIT) || defined(PROTO)
+     void
+ display_errors(void)
+ {
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/gui.h vim90/src/gui.h
+--- vim90_original/src/gui.h	2022-04-03 17:29:05
++++ vim90/src/gui.h	2024-07-01 10:03:10
+@@ -29,6 +29,10 @@
+ # include "gui_haiku.h"
+ #endif
+ 
++#ifdef FEAT_GUI_PLAYBIT
++# include "gui_playbit.h"
++#endif
++
+ // Needed when generating prototypes, since FEAT_GUI is always defined then.
+ #if defined(FEAT_XCLIPBOARD) && !defined(FEAT_GUI_MOTIF) \
+ 	&& !defined(FEAT_GUI_GTK)
+@@ -54,6 +58,7 @@
+  */
+ #if (defined(FEAT_DND) && defined(FEAT_GUI_GTK)) \
+ 	|| defined(FEAT_GUI_MSWIN) \
++	|| defined(FEAT_GUI_PLAYBIT) \
+ 	|| defined(FEAT_GUI_HAIKU)
+ # define HAVE_DROP_FILE
+ #endif
+@@ -426,6 +431,46 @@
+     guicolor_T	currFgColor;	    // Current foreground text color
+     guicolor_T	currBgColor;	    // Current background text color
+     guicolor_T	currSpColor;	    // Current special text color
++#endif
++
++#ifdef FEAT_GUI_PLAYBIT
++    GuiFont	currFont;	    // Current font
++    guicolor_T	currFgColor;	    // Current foreground text color
++    guicolor_T	currBgColor;	    // Current background text color
++    guicolor_T	currSpColor;	    // Current special text color
++    int eventsToUI[2];
++    int eventsToVim[2];
++    PBWindow *window;
++    PBElement *textArea;
++    int didGetChars;
++    guicolor_T uiFgColor;
++    guicolor_T uiBgColor;
++    guicolor_T uiSpColor;
++    int uiNumCols;
++    int uiNumRows;
++    int uiCharWidth;
++    int uiCharHeight;
++    int uiCursorColumn;
++    int uiCursorRow;
++    int uiCursorWidth;
++    int uiCursorHeight;
++    int uiCursorState;
++    uint32_t uiCursorColor;
++    uint32_t uiNormPixel;
++    uint32_t uiBackPixel;
++    UICell *uiCells;
++    char *uiRowBuffer;
++    int screenWidth;
++    int screenHeight;
++    int uiScreenWidth;
++    int uiScreenHeight;
++    int fontSize;
++    int uiFontSize;
++    int scaleFactor;
++    int uiScaleFactor;
++    char *uiDropAfterLayout;
++    int dialogResponse;
++    char_u *dialogTextResponse;
+ #endif
+ 
+ #ifdef FEAT_GUI_HAIKU
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/gui_playbit.c vim90/src/gui_playbit.c
+--- vim90_original/src/gui_playbit.c	1970-01-01 01:00:00
++++ vim90/src/gui_playbit.c	2024-10-14 15:23:53
+@@ -0,0 +1,1222 @@
++#define _GNU_SOURCE
++#include <assert.h>
++#include <float.h>
++#include <syslog.h>
++#include <pthread.h>
++#include <poll.h>
++
++#include "vim.h"
++#include "globals.h"
++#include "version.h"
++
++typedef struct TextCharacter {
++	char utf8Bytes[4];
++	int widthInCells;
++} TextCharacter;
++
++typedef struct Event {
++	// Events from the UI to Vim:
++#define EVENT_KEYBOARD (1000)
++#define EVENT_FOCUS    (1001)
++#define EVENT_NSIZE    (1002)
++#define EVENT_DROP     (1003)
++#define EVENT_MOUSE    (1004)
++#define EVENT_DIAGRESP (1005)
++#define EVENT_CLOSE    (1006)
++#define EVENT_START    (1007)
++
++	// Events from Vim to the UI:
++#define EVENT_TEXT    (2001)
++#define EVENT_INVERT  (2002)
++#define EVENT_CURSOR  (2003)
++#define EVENT_CLEAR   (2004)
++#define EVENT_DELETE  (2005)
++#define EVENT_INSERT  (2006)
++#define EVENT_RECOLOR (2007)
++#define EVENT_NCOLOR  (2008)
++#define EVENT_FLUSH   (2009)
++#define EVENT_TITLE   (2010)
++#define EVENT_RESIZE  (2011)
++#define EVENT_DIALOG  (2012)
++#define EVENT_BROWSE  (2013)
++
++	int type;
++	char *text;
++
++	union {
++		int di[6];
++		PBMessageKeyboard keyboard;
++	};
++} Event;
++
++static struct
++{
++    PBKeyCode key_sym;
++    char_u  vim_code0;
++    char_u  vim_code1;
++} special_keys[] =
++{
++    {PBKey_UP_ARROW,		'k', 'u'},
++    {PBKey_DOWN_ARROW,		'k', 'd'},
++    {PBKey_LEFT_ARROW,		'k', 'l'},
++    {PBKey_RIGHT_ARROW,		'k', 'r'},
++
++    {PBKey_F1,		'k', '1'},
++    {PBKey_F2,		'k', '2'},
++    {PBKey_F3,		'k', '3'},
++    {PBKey_F4,		'k', '4'},
++    {PBKey_F5,		'k', '5'},
++    {PBKey_F6,		'k', '6'},
++    {PBKey_F7,		'k', '7'},
++    {PBKey_F8,		'k', '8'},
++    {PBKey_F9,		'k', '9'},
++    {PBKey_F10,		'k', ';'},
++
++    {PBKey_F11,		'F', '1'},
++    {PBKey_F12,		'F', '2'},
++    {PBKey_F13,		'F', '3'},
++    {PBKey_F14,		'F', '4'},
++    {PBKey_F15,		'F', '5'},
++    {PBKey_F16,		'F', '6'},
++    {PBKey_F17,		'F', '7'},
++    {PBKey_F18,		'F', '8'},
++    {PBKey_F19,		'F', '9'},
++    {PBKey_F20,		'F', 'A'},
++
++    {PBKey_F21,		'F', 'B'},
++    {PBKey_F22,		'F', 'C'},
++    {PBKey_F23,		'F', 'D'},
++    {PBKey_F24,		'F', 'E'},	
++
++    {PBKey_ACTION_HELP,		'%', '1'},
++    {PBKey_BACKSPACE,		'k', 'b'},
++    {PBKey_INSERT,		'k', 'I'},
++    {PBKey_DELETE,		'k', 'D'},
++    {PBKey_HOME,		'k', 'h'},
++    {PBKey_END,		'@', '7'},
++    {PBKey_PAGE_UP,		'k', 'P'},
++    {PBKey_PAGE_DOWN,		'k', 'N'},
++    {PBKey_NUM_ADD,		'K', '6'},
++    {PBKey_NUM_SUBTRACT,	'K', '7'},
++    {PBKey_NUM_DIVIDE,		'K', '8'},
++    {PBKey_NUM_MULTIPLY,	'K', '9'},
++    {PBKey_NUM_ENTER,	'K', 'A'},	// Keypad Enter
++    {PBKey_NUM_DECIMAL,	'K', 'B'},
++
++    {PBKey_NUM_0,	'K', 'C'},
++    {PBKey_NUM_1,	'K', 'D'},
++    {PBKey_NUM_2,	'K', 'E'},
++    {PBKey_NUM_3,	'K', 'F'},
++    {PBKey_NUM_4,	'K', 'G'},
++    {PBKey_NUM_5,	'K', 'H'},
++    {PBKey_NUM_6,	'K', 'I'},
++    {PBKey_NUM_7,	'K', 'J'},
++    {PBKey_NUM_8,	'K', 'K'},
++    {PBKey_NUM_9,	'K', 'L'},
++
++    // Keys that we want to be able to use any modifier with:
++    {PBKey_SPACE,		' ', NUL},
++    {PBKey_TAB,		TAB, NUL},
++    {PBKey_ESCAPE,		ESC, NUL},
++    {PBKey_ENTER,		NL, NUL},
++
++    // End of list marker:
++    {0,			0, 0}
++};
++
++void gui_mch_prepare(int *argc, char **argv) {
++	// fprintf(stderr, "** PREPARE **\n");
++}
++
++static void WriteEvent(int fd, Event *event) {
++	ssize_t result = write(fd, event, sizeof(Event));
++	// fprintf(stderr, "-- WRITE %d %d %d --\n", fd, (int) result, event->type);
++	if (result < 0) { perror("WriteEvent"); }
++}
++
++#define REPAINT(r, c, nr, nc) if (gui.textArea) { \
++	PBElementRepaintPartial(gui.textArea, PB_RECT_4PD((c) * gui.uiCharWidth, (r) * gui.uiCharHeight, (nc) * gui.uiCharWidth, (nr) * gui.uiCharHeight)); }
++
++static void FreeEvent(Event event) {
++	free(event.text);
++}
++
++static bool DialogCompletionHandler(PBAlert *alert, PBAlertResponse response) {
++	Event event = { .type = EVENT_DIAGRESP, .di = { response } };
++	WriteEvent(gui.eventsToVim[1], &event);
++	return true;
++}
++
++static void BrowseDialogCompletionHandler(PBClipboardReader *items, PBUserContext context) {
++	PBStr path;
++
++	if (items && PBClipboardGetItemData(items, 0, PB_STR("text/x-playbit-path"), &path)) {
++		char *cString = malloc(path.len + 1);
++		memcpy(cString, path.ptr, path.len);
++		cString[path.len] = 0;
++		Event event = { .type = EVENT_DIAGRESP, .text = cString, .di = { 1 } };
++		WriteEvent(gui.eventsToVim[1], &event);
++		PBHeapFree(path.ptr);
++	} else {
++		Event event = { .type = EVENT_DIAGRESP, .di = { 0 } };
++		WriteEvent(gui.eventsToVim[1], &event);
++	}
++}
++
++static void ProcessEventToUI(Event event) {
++	if (event.type == EVENT_TEXT) {
++		int i = 0, x = event.di[1], y = event.di[0];
++		// fprintf(stderr, "EVENT_TEXT %d %d-%d %x\n", event.di[0], event.di[1], event.di[1] + strlen(event.text) - 1, event.di[2]);
++		TextCharacter *array = (TextCharacter *) event.text;
++
++		for (int i = 0; i < event.di[3]; i++) { 
++			for (int k = 0; k < array[i].widthInCells; k++, x++) {
++				if (y < 0 || x < 0 || y >= gui.uiNumRows || x >= gui.uiNumCols) { continue; }
++
++				int j = y * gui.uiNumCols + x;
++
++				if (k) {
++					memset(&gui.uiCells[j].utf8Bytes[0], 0,
++							sizeof(array[i].utf8Bytes));
++				} else {
++					memcpy(&gui.uiCells[j].utf8Bytes[0], &array[i].utf8Bytes[0],
++							sizeof(array[i].utf8Bytes));
++				}
++
++				gui.uiCells[j].flags = event.di[2];
++				gui.uiCells[j].foreground = gui.uiFgColor;
++				gui.uiCells[j].background = gui.uiBgColor;
++
++				if (x == gui.uiCursorColumn && y == gui.uiCursorRow && !(event.di[2] & DRAW_TRANSP)) {
++					gui.uiCursorState = 0;
++				}
++			}
++		}
++
++		REPAINT(event.di[0], event.di[1], 1, x - event.di[1]);
++	} else if (event.type == EVENT_RESIZE) {
++		if (gui.uiNumRows != event.di[4] || gui.uiNumCols != event.di[5] || gui.uiCharWidth != event.di[0] 
++				|| gui.uiCharHeight != event.di[1] || gui.uiFontSize != event.di[2]) {
++			gui.uiCharWidth = event.di[0];
++			gui.uiCharHeight = event.di[1];
++			gui.uiFontSize = event.di[2];
++			gui.uiNumRows = event.di[4];
++			gui.uiNumCols = event.di[5];
++			gui.uiCells = (UICell *) realloc(gui.uiCells, gui.uiNumRows * gui.uiNumCols * sizeof(UICell));
++			gui.uiRowBuffer = (char *) realloc(gui.uiRowBuffer, gui.uiNumCols * 4 /* utf-8 bytes */);
++			gui.uiCursorState = 0;
++
++			for (int j = 0; j < gui.uiNumRows * gui.uiNumCols; j++) {
++				gui.uiCells[j].utf8Bytes[0] = ' ';
++				gui.uiCells[j].utf8Bytes[1] = 0;
++				gui.uiCells[j].flags = 0;
++				gui.uiCells[j].foreground = gui.uiFgColor;
++				gui.uiCells[j].background = gui.uiBgColor;
++			}
++
++			if (gui.textArea) { PBElementRepaintAll(gui.textArea); } // Include the clear area!
++		}
++	} else if (event.type == EVENT_CLEAR) {
++		for (int y = event.di[0]; y <= event.di[2]; y++) {
++			for (int x = event.di[1]; x <= event.di[3]; x++) {
++				if (y < 0 || x < 0 || y >= gui.uiNumRows || x >= gui.uiNumCols) { continue; }
++				int j = y * gui.uiNumCols + x;
++				gui.uiCells[j].utf8Bytes[0] = ' ';
++				gui.uiCells[j].utf8Bytes[1] = 0;
++				gui.uiCells[j].foreground = gui.uiFgColor;
++				gui.uiCells[j].background = gui.uiBackPixel;
++				gui.uiCells[j].flags = 0;
++				if (x == gui.uiCursorColumn && y == gui.uiCursorRow) { gui.uiCursorState = 0; }
++			}
++		}
++
++		REPAINT(event.di[0], event.di[1], event.di[2] - event.di[0] + 1, event.di[3] - event.di[1] + 1);
++	} else if (event.type == EVENT_DELETE) {
++		int row = event.di[0], numLines = event.di[1], scrollLeft = event.di[2], scrollRight = event.di[3], scrollBottom = event.di[4];
++		// fprintf(stderr, "delete %d %d %d %d %d\n", row, numLines, scrollLeft, scrollRight, scrollBottom);
++
++		for (int y = row; y <= scrollBottom - numLines; y++) {
++			for (int x = scrollLeft; x <= scrollRight; x++) {
++				if (y < 0 || x < 0 || (y + numLines) >= gui.uiNumRows || x >= gui.uiNumCols) { continue; }
++				gui.uiCells[y * gui.uiNumCols + x] = gui.uiCells[(y + numLines) * gui.uiNumCols + x];
++				if (x == gui.uiCursorColumn && y == gui.uiCursorRow) { gui.uiCursorState = 0; }
++			}
++		}
++
++		REPAINT(row, scrollLeft, scrollBottom - numLines - row + 1, scrollRight - scrollLeft + 1);
++	} else if (event.type == EVENT_INSERT) {
++		int row = event.di[0], numLines = event.di[1], scrollLeft = event.di[2], scrollRight = event.di[3], scrollBottom = event.di[4];
++		// fprintf(stderr, "insert %d %d %d %d %d\n", row, numLines, scrollLeft, scrollRight, scrollBottom);
++
++		for (int y = scrollBottom; y >= row + numLines; y--) {
++			for (int x = scrollLeft; x <= scrollRight; x++) {
++				if ((y - numLines) < 0 || x < 0 || y >= gui.uiNumRows || x >= gui.uiNumCols) { continue; }
++				gui.uiCells[y * gui.uiNumCols + x] = gui.uiCells[(y - numLines) * gui.uiNumCols + x];
++				if (x == gui.uiCursorColumn && y == gui.uiCursorRow) { gui.uiCursorState = 0; }
++			}
++		}
++
++		REPAINT(row + numLines, scrollLeft, scrollBottom - numLines - row + 1, scrollRight - scrollLeft + 1);
++	} else if (event.type == EVENT_INVERT) {
++		// TODO.
++	} else if (event.type == EVENT_CURSOR) {
++		gui.uiCursorColumn = event.di[0];
++		gui.uiCursorRow    = event.di[1];
++		gui.uiCursorWidth  = event.di[2];
++		gui.uiCursorHeight = event.di[3];
++		gui.uiCursorColor  = 0xFF000000 | event.di[4];
++		gui.uiCursorState  = event.di[5];
++		REPAINT(event.di[1], event.di[0], 1, 1);
++	} else if (event.type == EVENT_RECOLOR) {
++		gui.uiBgColor = 0xFF000000 | event.di[0];
++		gui.uiFgColor = 0xFF000000 | event.di[1];
++		gui.uiSpColor = 0xFF000000 | event.di[2];
++	} else if (event.type == EVENT_NCOLOR) {
++		gui.uiNormPixel = 0xFF000000 | event.di[0];
++		gui.uiBackPixel = 0xFF000000 | event.di[1];
++		if (gui.textArea) { PBElementRepaintAll(gui.textArea); } // Include the clear area!
++	} else if (event.type == EVENT_TITLE) {
++		PBWindowSetTitle(gui.window, PB_STR(event.text));
++	} else if (event.type == EVENT_DIALOG) {
++		fprintf(stderr, "in EVENT_DIALOG\n");
++
++		PBAlertConfiguration config = {};
++		config.message = PB_STR((const char *) event.text);
++		config.description = PB_STR((const char *) (config.message.ptr + config.message.len + 1));
++
++		char *buttons = event.text + config.message.len + 1 + config.description.len + 1;
++		config.primaryButtonLabel.ptr = buttons;
++		int n = 0;
++		bool latchAccessKey = false;
++
++		while (*buttons) {
++			if (*buttons == '\n') {
++				n++;
++
++				if (n == 1) {
++					config.secondaryButtonLabel.ptr = buttons + 1;
++				} else if (n == 2) {
++					config.tertiaryButtonLabel.ptr = buttons + 1;
++				} else if (n == 3) {
++					break;
++				}
++			} else if (*buttons == '&' && strlen(buttons) >= 2) {
++				memmove(&buttons[0], &buttons[1], strlen(buttons) - 1);
++				buttons[strlen(buttons) - 1] = 0;
++				latchAccessKey = true;
++				continue;
++			} else {
++				if (latchAccessKey) {
++					PBKeyCode accessKey = 0;
++
++					if (*buttons >= 'a' && *buttons <= 'z') {
++						accessKey = PBKey_A + *buttons - 'a';
++					} else if (*buttons >= 'A' && *buttons <= 'Z') {
++						accessKey = PBKey_A + *buttons - 'A';
++					}
++
++					latchAccessKey = false;
++
++					if (accessKey) {
++						if (n == 0) {
++							config.primaryButtonAccessKey = accessKey;
++						} else if (n == 1) {
++							config.secondaryButtonAccessKey = accessKey;
++						} else if (n == 2) {
++							config.tertiaryButtonAccessKey = accessKey;
++						}
++					}
++				}
++
++				if (n == 0) {
++					config.primaryButtonLabel.len++;
++				} else if (n == 1) {
++					config.secondaryButtonLabel.len++;
++				} else if (n == 2) {
++					config.tertiaryButtonLabel.len++;
++				}
++			}
++
++			buttons++;
++		}
++
++		PBAlertAdd(gui.window, config, PBAlertCompletionHandler_Make(DialogCompletionHandler));
++		fprintf(stderr, "...alert added\n");
++	} else if (event.type == EVENT_BROWSE) {
++		PBFilePickerConfiguration configuration = {
++			.defaultFolder = PB_STR(event.text ?: ""),
++			.flags = event.di[0] == -1 ? PBFilePicker_MODE_OPEN_FOLDER
++				: event.di[0] == 0 ? PBFilePicker_MODE_OPEN_FILE
++				: PBFilePicker_MODE_SAVE_FILE,
++		};
++
++		PBFilePickerShow(gui.window, configuration,
++				PBFilePickerCompletionHandler_Make(BrowseDialogCompletionHandler));
++	} else if (event.type == EVENT_FLUSH) {
++	} else {
++		assert(false);
++	}
++
++	FreeEvent(event);
++}
++
++static void SendResizeEvent() {
++	Event resizeEvent = { .type = EVENT_RESIZE, .di = { gui.char_width, gui.char_height, gui.fontSize, 0, gui.num_rows, gui.num_cols } };
++	WriteEvent(gui.eventsToUI[1], &resizeEvent);
++}
++
++static void ProcessAllEventsToUI(bool ignoreFlush) {
++	while (true) {
++		Event event;
++		ssize_t result = read(gui.eventsToUI[0], &event, sizeof(event));
++		// fprintf(stderr, "-- UI READ %d --\n", (int) result);
++
++		if (sizeof(Event) == result) {
++			// fprintf(stderr, "event %d\n", (int) event.type);
++			ProcessEventToUI(event);
++			if (!ignoreFlush && event.type == EVENT_FLUSH) { break; }
++		} else {
++			break;
++		}
++	}
++}
++
++static void ProcessAllEventsToUI2(PB_UNUSED PBEventSource *source, PB_UNUSED PBEventType type) {
++	ProcessAllEventsToUI(false);
++}
++
++static intptr_t WindowMessage(PBElement *element, PBMessage *message) {
++	if (message->type == PBMsg_WINDOW_ACTIVATE) {
++		ProcessAllEventsToUI(true);
++		Event event = { .type = EVENT_FOCUS, .di = { 1 } };
++		WriteEvent(gui.eventsToVim[1], &event);
++	} else if (message->type == PBMsg_WINDOW_DEACTIVATE) {
++		ProcessAllEventsToUI(true);
++		Event event = { .type = EVENT_FOCUS, .di = { 0 } };
++		WriteEvent(gui.eventsToVim[1], &event);
++	} else if (message->type == PBMsg_WINDOW_CLOSE) {
++		Event event = { .type = EVENT_CLOSE };
++		WriteEvent(gui.eventsToVim[1], &event);
++		return 1;
++	}
++
++	return 0;
++}
++
++static intptr_t TextAreaMessage(PBElement *element, PBMessage *message) {
++	if (message->type == PBMsg_CUSTOM_PAINT && message->customPaint.atDepth == PBDepthIndex_MAIN) {
++		PBPainter *painter = message->customPaint.painter;
++		PBSize size = PBElementGetSize(element);
++
++		PBColor clearColor = PBColorFromSRGB8(gui.uiBackPixel);
++		PBDrawRectangle(painter, PB_RECT_4(0, size.width, gui.uiCharHeight * gui.uiNumRows, size.height), clearColor);
++		PBDrawRectangle(painter, PB_RECT_4(gui.uiCharWidth * gui.uiNumCols, size.width, 0, gui.uiCharHeight * gui.uiNumRows), clearColor);
++
++		int bytesInBuffer = 0;
++
++		for (int i = 0; i < gui.uiNumRows; i++) {
++			PBRectangle row = PB_RECT_4PD(0, i * gui.uiCharHeight, size.width, gui.uiCharHeight);
++			bool isNewClipRegionNonEmpty;
++			PBPreviousClipRegion previousClipRegion = PBPainterClipRectangle(painter, row, &isNewClipRegionNonEmpty);
++
++			if (isNewClipRegionNonEmpty) {
++				for (int j = 0, start = 0; j <= gui.uiNumCols; j++) {
++					UICell *startCell = &gui.uiCells[i * gui.uiNumCols + start];
++					UICell *jCell = &gui.uiCells[i * gui.uiNumCols + j];
++
++					if (j == gui.uiNumCols || jCell->foreground != startCell->foreground 
++							|| jCell->background != startCell->background || jCell->flags != startCell->flags) {
++						// TODO Use the flags for different fonts.
++
++						PBPositionedTextAttribute attributes[] = {
++							{ .attribute = { .type = PBTextAttribute_FONT_FAMILY, .string = PB_STR("mono") } },
++							{ .attribute = { .type = PBTextAttribute_SIZE, .f32 = (float) gui.uiFontSize } },
++						};
++
++						PBTextPlan *textPlan = PBTextPlanCreate(PB_STR(gui.uiRowBuffer, bytesInBuffer), &attributes[0], 
++								sizeof(attributes) / sizeof(attributes[0]), NULL);
++
++						if (textPlan) {
++							PBRectangle span = PB_RECT_4(row.l + start * gui.uiCharWidth, row.l + j * gui.uiCharWidth, row.t, row.b);
++							PBDrawRectangle(painter, span, PBColorFromSRGB8(startCell->background));
++							PBColor foregroundColor = PBColorFromSRGB8(startCell->foreground);
++							PBTextPlanLayout(textPlan, PBTextPlanLayout_PREFORMATTED | PBTextPlanLayout_ONE_LINE, 0, 0);
++							PBDrawText(painter, textPlan, span.l, span.t, &foregroundColor);
++							PBTextPlanRelease(textPlan);
++						}
++
++						bytesInBuffer = 0;
++						start = j;
++					}
++
++					if (j < gui.uiNumCols) {
++						for (int k = 0; k < 4; k++) {
++							if (!jCell->utf8Bytes[k]) {
++								break;
++							}
++
++							gui.uiRowBuffer[bytesInBuffer++] = jCell->utf8Bytes[k];
++						}
++					}
++				}
++			}
++
++			PBPainterRestoreClip(painter, previousClipRegion);
++		}
++
++		if (gui.uiCursorState == 1) {
++			PBColor color = PBColorFromSRGB8(gui.uiCursorColor);
++			PBRectangle cell = PB_RECT_4PD(gui.uiCursorColumn * gui.uiCharWidth, gui.uiCursorRow * gui.uiCharHeight, 
++					gui.uiCursorWidth, gui.uiCursorHeight);
++			PBDrawRectangle(painter, PB_RECT_4(cell.l, cell.r, cell.t, cell.t + 1), color);
++			PBDrawRectangle(painter, PB_RECT_4(cell.l, cell.r, cell.b - 1, cell.b), color);
++			PBDrawRectangle(painter, PB_RECT_4(cell.l, cell.l + 1, cell.t + 1, cell.b - 1), color);
++			PBDrawRectangle(painter, PB_RECT_4(cell.r - 1, cell.r, cell.t + 1, cell.b - 1), color);
++		} else if (gui.uiCursorState == 2) {
++			PBDrawRectangle(painter, PB_RECT_4PD(gui.uiCursorColumn * gui.uiCharWidth, gui.uiCursorRow * gui.uiCharHeight, 
++						gui.uiCursorWidth, gui.uiCursorHeight), PBColorFromSRGB8(gui.uiCursorColor));
++		}
++	} else if (message->type == PBMsg_KEY_DOWN) {
++		Event event = { .type = EVENT_KEYBOARD, .keyboard = message->keyboard };
++		event.text = strndup(event.keyboard.text.ptr, event.keyboard.text.len);
++		WriteEvent(gui.eventsToVim[1], &event);
++	} else if (message->type == PBMsg_LEFT_DOWN || message->type == PBMsg_MIDDLE_DOWN || message->type == PBMsg_RIGHT_DOWN
++			|| message->type == PBMsg_LEFT_UP || message->type == PBMsg_MIDDLE_UP || message->type == PBMsg_RIGHT_UP
++			|| message->type == PBMsg_LEFT_DRAG || message->type == PBMsg_MIDDLE_DRAG || message->type == PBMsg_RIGHT_DRAG) {
++		Event event = { .type = EVENT_MOUSE, .di = {
++			message->type == PBMsg_LEFT_DOWN ? MOUSE_LEFT : message->type == PBMsg_RIGHT_DOWN ? MOUSE_RIGHT
++				: message->type == PBMsg_MIDDLE_DOWN ? MOUSE_MIDDLE
++				: (message->type == PBMsg_LEFT_UP || message->type == PBMsg_MIDDLE_UP || message->type == PBMsg_RIGHT_UP)
++				? MOUSE_RELEASE : MOUSE_DRAG, message->mouse.x, message->mouse.y,
++			message->mouse.clickChainCount > 1, ((message->mouse.modifiers & PBModifier_SYS) ? MOUSE_CTRL : 0)
++				| ((message->mouse.modifiers & PBModifier_SHIFT) ? MOUSE_SHIFT : 0)
++				| ((message->mouse.modifiers & PBModifier_ALT) ? MOUSE_ALT : 0) } };
++		WriteEvent(gui.eventsToVim[1], &event);
++	} else if (message->type == PBMsg_LAYOUT) {
++		if (message->layout.flags & PBMessageLayout_RESIZED) {
++			ProcessAllEventsToUI(true);
++			PBSize size = PBElementGetSize(element);
++			__atomic_store_n(&gui.uiScreenWidth, size.width, __ATOMIC_SEQ_CST);
++			__atomic_store_n(&gui.uiScreenHeight, size.height, __ATOMIC_SEQ_CST);
++			__atomic_store_n(&gui.uiScaleFactor, PBElementGetScaleFactor(element), __ATOMIC_SEQ_CST);
++			Event event = { .type = EVENT_NSIZE };
++			WriteEvent(gui.eventsToVim[1], &event);
++		}
++
++		if (gui.uiDropAfterLayout) {
++			// HACK See "GUI delay" in main.c.
++			// Without waiting here, the GUI displays a message when the first file is opened.
++			struct timespec tm = { .tv_nsec = 150 * 1000000 /* ms */ };
++			nanosleep(&tm, NULL);
++
++			Event event = { .type = EVENT_DROP };
++			event.text = gui.uiDropAfterLayout;
++			WriteEvent(gui.eventsToVim[1], &event);
++			gui.uiDropAfterLayout = NULL;
++		}
++	}
++
++	return 0;
++}
++
++static intptr_t ApplicationMessage(PBMessage *message) {
++	if (message->type == PBMsg_APP_CREATE) {
++		if (!gui.window) {
++			Event event = { .type = EVENT_START };
++			WriteEvent(gui.eventsToVim[1], &event);
++			PBWindowCreationOptions options = (PBWindowCreationOptions) { .type = PBWindowType_STANDARD,
++				.width = 640, .height = 480, .title = PB_STR("GVIM"), .applicationName = PB_STR("GVIM") };
++			gui.window = message->appCreate.window = PBWindowCreate(options);
++			PBElementSetUserMessageHandler((PBElement *) gui.window,
++					PBElementMessageHandler_Make(WindowMessage));
++			gui.textArea = PBElementAdd((PBElement *) gui.window,
++					PBElement_CUSTOM_PAINT | PBElement_CUSTOM_LAYOUT | PBElement_INPUT_MOUSE_ALL,
++					PBElementMessageHandler_Make(TextAreaMessage));
++			PBElementFocus(gui.textArea, 0);
++			PBEventSource *source = PBEventSourceCreateFromFD(gui.eventsToUI[0], false);
++			PBEventSourceSetHandler(source, PBEventHandler_Make(ProcessAllEventsToUI2));
++			PBEventSourceSetFlags(source, PBEventSourceFlags_READ);
++			PBEventSourceActivate(source);
++		} else {
++			message->appCreate.window = gui.window;
++			PBElementRetain((PBElement *) gui.window);
++		}
++
++		if (message->appCreate.argvCount >= 3 && message->appCreate.argv[0].len == 4
++				&& 0 == memcmp(message->appCreate.argv[0].ptr, "file", 4)) {
++			free(gui.uiDropAfterLayout);
++			gui.uiDropAfterLayout = calloc(1, message->appCreate.argv[2].len + 1);
++			memcpy(gui.uiDropAfterLayout, message->appCreate.argv[2].ptr, message->appCreate.argv[2].len);
++			PBElementContentsChanged(gui.textArea, 0);
++		}
++	}
++
++	return 0;
++}
++
++static void *StartUIThread(void *_unused) {
++	PBEventLoop(PBApplicationMessageHandler_Make(ApplicationMessage));
++	exit(0);
++}
++
++int gui_mch_init(void) {
++	// fprintf(stderr, "** INIT **\n");
++
++	pipe2(gui.eventsToUI, O_CLOEXEC | O_NONBLOCK);
++	pipe2(gui.eventsToVim, O_CLOEXEC | O_NONBLOCK);
++
++	// Only one of the pipes can have blocking writes.
++	fcntl(gui.eventsToUI[1], F_SETFL, fcntl(gui.eventsToUI[1], F_GETFL) & ~O_NONBLOCK);
++
++	display_errors();
++	gui.def_norm_pixel = 0x000000;	//  black
++	gui.def_back_pixel = 0xFFFFFF;	//  white
++	gui.norm_pixel = gui.def_norm_pixel;
++	gui.back_pixel = gui.def_back_pixel;
++
++	gui.border_offset = gui.border_width;
++
++	// Get the colors from the "Normal" group (set in syntax.c or in a vimrc
++	// file)
++	set_normal_colors();
++
++	/*
++	 * Check that none of the colors are the same as the background color
++	 */
++	gui_check_colors();
++
++	// Get the colors for the highlight groups (gui_check_colors() might have
++	// changed them)
++	highlight_gui_started();	    // re-init colors and fonts
++
++	// Create the window.
++	pthread_t uiThread;
++	pthread_create(&uiThread, NULL, StartUIThread, NULL);
++
++	// Wait for the GUI to be ready (so we can start loading fonts etc).
++	Event event;
++	struct pollfd fds[] = { { .fd = gui.eventsToVim[0], .events = POLLIN } };
++	poll(fds, 1, -1);
++	ssize_t result = read(gui.eventsToVim[0], &event, sizeof(event));
++	assert(result == sizeof(Event) && event.type == EVENT_START);
++
++	return OK;
++}
++
++int gui_mch_open(void) {
++	// fprintf(stderr, "** OPEN **\n");
++	return OK;
++}
++
++void gui_mch_exit(int vim_exitcode) {
++	// fprintf(stderr, "** EXIT **\n");
++}
++
++int gui_mch_init_check(void) {
++	return OK;
++}
++
++void gui_mch_flush(void) {
++	Event event = { .type = EVENT_FLUSH };
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++int gui_mch_is_blink_off(void) {
++	return FALSE;
++}
++
++void gui_mch_new_colors(void) {
++	Event event = { .type = EVENT_NCOLOR, .di = { gui.norm_pixel, gui.back_pixel } };
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++void gui_mch_set_bg_color(guicolor_T color) {
++	// fprintf(stderr, "** BG %x **\n", color);
++	gui.currBgColor = color;
++	Event event = { .type = EVENT_RECOLOR, .di = { gui.currBgColor, gui.currFgColor, gui.currSpColor } };
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++void gui_mch_set_fg_color(guicolor_T color) {
++	// fprintf(stderr, "** FG %x **\n", color);
++	gui.currFgColor = color;
++	Event event = { .type = EVENT_RECOLOR, .di = { gui.currBgColor, gui.currFgColor, gui.currSpColor } };
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++void gui_mch_set_sp_color(guicolor_T color) {
++	gui.currSpColor = color;
++	Event event = { .type = EVENT_RECOLOR, .di = { gui.currBgColor, gui.currFgColor, gui.currSpColor } };
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++guicolor_T gui_mch_get_rgb(guicolor_T pixel) {
++	return (guicolor_T) pixel;
++}
++
++guicolor_T gui_mch_get_rgb_color(int r, int g, int b) {
++	return gui_get_rgb_color_cmn(r, g, b);
++}
++
++guicolor_T gui_mch_get_color(char_u *name) {
++	return gui_get_color_cmn(name);
++}
++
++GuiFont gui_mch_get_font(char_u *name, int giveErrorIfMissing) {
++	fprintf(stderr, "** GET FONT **\n");
++	// TODO Getting fonts.
++	if (giveErrorIfMissing) semsg(_(e_unknown_font_str), name);
++	return NOFONT;
++}
++
++void gui_mch_set_font(GuiFont font) {
++	gui.currFont = font;
++}
++
++int gui_mch_init_font(char_u *font_name, int fontset) {
++	fprintf(stderr, "** INIT FONT '%s' **\n", font_name);
++	// TODO Use the given font name.
++
++	int size = 14;
++	const char *sizeString = font_name ? strstr((char *) font_name, ":h") : NULL;
++	if (sizeString) { size = atoi(&sizeString[2]); }
++
++	PBTextStyle *baseStyle = PBTextStyleOpenByName(PBNamedTextStyle_MONOSPACED);
++
++	if (!gui.scaleFactor) {
++		gui.scaleFactor = 100;
++	}
++
++	size = size * gui.scaleFactor / 100;
++
++	PBTextAttribute attributes[] = {
++		{ .type = PBTextAttribute_STYLE, .style = baseStyle },
++		{ .type = PBTextAttribute_SIZE, .f32 = (float) size },
++	};
++
++	PBTextStyle *style = PBTextStyleCreate(&attributes[0], sizeof(attributes) / sizeof(attributes[0]));
++	gui.char_width = PBTextStyleGetMonospacedGlyphWidth(style, NULL);
++	gui.char_height = PBTextStyleGetLineHeight(style, NULL);
++	gui.fontSize = size;
++	PBTextStyleRelease(style);
++	PBTextStyleRelease(baseStyle);
++
++	return OK;
++}
++
++void gui_mch_free_font(GuiFont font) {
++	if (font) {
++		// TODO Free the font.
++	}
++}
++
++char_u *gui_mch_get_fontname(GuiFont font, char_u *name) {
++	if (name == NULL)
++		return NULL;
++	return vim_strsave(name);
++}
++
++void gui_mch_set_winpos(int x, int y) {
++	// TODO Move the window.
++}
++
++int gui_mch_get_winpos(int *x, int *y) {
++	// TODO Get the window position.
++	*x = 0;
++	*y = 0;
++	return OK;
++}
++
++void gui_mch_set_shellsize(int w, int h, int m_w, int m_h, int b_w, int b_h, int d) {
++	// TODO Resize the window.
++}
++
++void gui_mch_get_screen_dimensions(int* screen_w, int* screen_h) {
++	*screen_w = gui.screenWidth;
++	*screen_h = gui.screenHeight;
++}
++
++void gui_mch_set_text_area_pos(int x, int y, int w, int h) {
++	// TODO Set the text area position.
++}
++
++void gui_mch_enable_scrollbar(scrollbar_T *sb, int flag) {
++}
++
++void gui_mch_set_scrollbar_thumb(scrollbar_T *sb, int val, int size, int max) {
++}
++
++void gui_mch_set_scrollbar_pos(scrollbar_T *sb, int x, int y, int w, int h) {
++}
++
++int gui_mch_get_scrollbar_xpadding(void) {
++	return 0;
++}
++
++int gui_mch_get_scrollbar_ypadding(void) {
++	return 0;
++}
++
++void gui_mch_create_scrollbar(scrollbar_T *sb, int orient) {
++}
++
++void gui_mch_destroy_scrollbar(scrollbar_T *sb) {
++}
++
++void gui_mch_set_blinking(long waittime, long on, long off) {
++}
++
++void gui_mch_stop_blink(int may_call_gui_update_cursor) {
++}
++
++void gui_mch_start_blink(void) {
++}
++
++int gui_mch_adjust_charheight(void) {
++	return OK;
++}
++
++void gui_mch_draw_string(int row, int col, char_u *s, int len, int flags) {
++	// fprintf(stderr, "** DRAW STRING '%.*s' (%d,%d) %x **\n", len, s, row, col, flags);
++	size_t characterCount = mb_charlen_len(s, len);
++	TextCharacter *array = (TextCharacter *) malloc(sizeof(TextCharacter) * characterCount);
++	Event event = { .type = EVENT_TEXT, .text = (char *) array,
++		.di = { row, col, flags, characterCount } };
++
++	for (int i = 0; i < characterCount; i++) {
++		size_t bytesInCharacter = mb_ptr2len(s);
++
++		if (bytesInCharacter <= 4) {
++			memcpy(&array[i].utf8Bytes[0], s, bytesInCharacter);
++			memset(&array[i].utf8Bytes[bytesInCharacter], 0, 4 - bytesInCharacter);
++		} else {
++			array[i].utf8Bytes[0] = '?';
++			array[i].utf8Bytes[1] = 0;
++		}
++
++		array[i].widthInCells = mb_string2cells(s, bytesInCharacter);
++		s += bytesInCharacter;
++	}
++
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++int gui_mch_haskey(char_u *name) {
++	int i;
++
++	for (i = 0; special_keys[i].vim_code1 != NUL; i++)
++		if (name[0] == special_keys[i].vim_code0
++				&& name[1] == special_keys[i].vim_code1)
++			return OK;
++	return FAIL;
++}
++
++void gui_mch_beep(void) {
++}
++
++void gui_mch_flash(int msec) {
++}
++
++void gui_mch_invert_rectangle(int r, int c, int nr, int nc) {
++	fprintf(stderr, "** INVERT RECT **\n");
++	Event event = { .type = EVENT_INVERT, .di = { r, c, nr, nc } };
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++void gui_mch_iconify(void) {
++	// TODO Minimize the window.
++}
++
++void gui_mch_set_foreground(void) {
++	// TODO Activate the window.
++}
++
++void gui_mch_settitle(char_u *title, char_u *icon) {
++	// fprintf(stderr, "** SET TITLE '%s' **\n", title);
++	Event event = { .type = EVENT_TITLE, .text = strdup((char *) title) };
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++void gui_mch_draw_hollow_cursor(guicolor_T color) {
++	// fprintf(stderr, "** HOLLOW CURSOR %x **\n", color);
++	Event event = { .type = EVENT_CURSOR, .di = { gui.col, gui.row, gui.char_width, gui.char_height, color, 1 } };
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++void gui_mch_draw_part_cursor(int w, int h, guicolor_T color) {
++	// fprintf(stderr, "** PART CURSOR %x (%d,%d) **\n", color, w, h);
++	Event event = { .type = EVENT_CURSOR, .di = { gui.col, gui.row, w, h, color, 2 } };
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++static void ProcessEventToVim(Event event) {
++	// fprintf(stderr, "[[ EVENT TO VIM %d ]]\n", event.type);
++
++	if (event.type == EVENT_KEYBOARD) {
++		char_u string[40];
++		int modifiers = 0, i;
++
++		if (event.keyboard.modifiers & PBModifier_SYS  ) { modifiers |= MOD_MASK_CTRL ; }
++		if (event.keyboard.modifiers & PBModifier_SHIFT) { modifiers |= MOD_MASK_SHIFT; }
++		if (event.keyboard.modifiers & PBModifier_ALT  ) { modifiers |= MOD_MASK_ALT  ; }
++
++		for (i = 0; special_keys[i].key_sym != 0; i++) {
++			if (special_keys[i].key_sym != event.keyboard.mappedCode) {
++				continue;
++			}
++
++			int key;
++
++			if (special_keys[i].vim_code1 == NUL) {
++				key = special_keys[i].vim_code0;
++			} else {
++				key = TO_SPECIAL(special_keys[i].vim_code0, special_keys[i].vim_code1);
++			}
++
++			key = simplify_key(key, &modifiers);
++
++			if (key == CSI) {
++				key = K_CSI;
++			}
++
++			if (modifiers) {
++				string[0] = CSI;
++				string[1] = KS_MODIFIER;
++				string[2] = modifiers;
++				add_to_input_buf(string, 3);
++			}
++
++			if (IS_SPECIAL(key)) {
++				string[0] = CSI;
++				string[1] = K_SECOND(key);
++				string[2] = K_THIRD(key);
++				// fprintf(stderr, "\tsending special chars A\n");
++				add_to_input_buf(string, 3);
++				gui.didGetChars = 1;
++			} else if (key < 0x80) {
++				// fprintf(stderr, "\tsending special chars B\n");
++				string[0] = key;
++				add_to_input_buf_csi(string, 1);
++				gui.didGetChars = 1;
++			}
++
++			break;
++		}
++
++		if (special_keys[i].key_sym == 0) {
++			if (!event.keyboard.text.len && !(event.keyboard.modifiers & ~(PBModifier_SHIFT | PBModifier_SYS | PBModifier_ALT))
++					&& (event.keyboard.modifiers & (PBModifier_SYS | PBModifier_ALT))) {
++				// Manually map to characters, to handle the case where CTRL and/or ALT are held.
++
++				char c = 0;
++				bool shift = event.keyboard.modifiers & PBModifier_SHIFT;
++
++				if (event.keyboard.mappedCode >= PBKey_A && event.keyboard.mappedCode <= PBKey_Z) {
++					c = (shift ? 'A' : 'a') + event.keyboard.mappedCode - PBKey_A;
++				} else if (event.keyboard.mappedCode >= PBKey_1 && event.keyboard.mappedCode <= PBKey_0) {
++					c = (shift ? "!@#$%^&*()" : "1234567890")[event.keyboard.mappedCode - PBKey_1];
++				} else if (event.keyboard.mappedCode == PBKey_SPACE) {
++					c = ' ';
++				} else if (event.keyboard.mappedCode >= PBKey_HYPHEN && event.keyboard.mappedCode <= PBKey_EQUALS) {
++					c = (shift ? "_+{}" : "-=[]")[event.keyboard.mappedCode - PBKey_HYPHEN];
++				} else if (event.keyboard.mappedCode >= PBKey_COMMA && event.keyboard.mappedCode <= PBKey_SLASH) {
++					c = (shift ? "<>?" : ",./")[event.keyboard.mappedCode - PBKey_COMMA];
++				} else if (event.keyboard.mappedCode >= PBKey_PUNCTUATION_1 && event.keyboard.mappedCode <= PBKey_PUNCTUATION_5) {
++					c = (shift ? "| :\"~" : "\\ ;'`")[event.keyboard.mappedCode - PBKey_PUNCTUATION_1];
++				}
++
++				if (c) {
++					event.text = (char *) realloc(event.text, 1);
++					event.text[0] = c;
++					event.keyboard.text.len = 1;
++				}
++			}
++
++			for (uintptr_t i = 0; i < event.keyboard.text.len; i++) {
++				int ch = simplify_key(event.text[i], &modifiers);
++				modifiers = may_remove_shift_modifier(modifiers, ch);
++				ch = extract_modifiers(ch, &modifiers, FALSE, NULL);
++
++				if (ch == CSI) {
++					ch = K_CSI;
++				}
++
++				if (modifiers) {
++					string[0] = CSI;
++					string[1] = KS_MODIFIER;
++					string[2] = modifiers;
++					add_to_input_buf(string, 3);
++				}
++
++				if (ch < 0x80) {
++					// fprintf(stderr, "\tsending chars\n");
++					string[0] = ch;
++					add_to_input_buf_csi(string, 1);
++					gui.didGetChars = 1;
++				}
++			}
++		}
++	} else if (event.type == EVENT_FOCUS) {
++		gui_focus_change(event.di[0]);
++	} else if (event.type == EVENT_NSIZE) {
++		int oldScaleFactor = gui.scaleFactor;
++		gui.screenWidth = __atomic_load_n(&gui.uiScreenWidth, __ATOMIC_SEQ_CST);
++		gui.screenHeight = __atomic_load_n(&gui.uiScreenHeight, __ATOMIC_SEQ_CST);
++		gui.scaleFactor = __atomic_load_n(&gui.uiScaleFactor, __ATOMIC_SEQ_CST);
++
++		gui_resize_shell(gui.screenWidth, gui.screenHeight);
++
++		if (oldScaleFactor != gui.scaleFactor) {
++			gui_init_font(hl_get_font_name(), FALSE);
++		}
++	} else if (event.type == EVENT_DROP) {
++		fprintf(stderr, "drop with screen size %d %d\n", (int) gui.screenWidth, (int) gui.screenHeight);
++		char_u **fnames = ALLOC_MULT(char_u *, 1);
++		fnames[0] = vim_strsave((char_u *) event.text);
++		gui_handle_drop(-1, -1, 0, fnames, 1);
++	} else if (event.type == EVENT_MOUSE) {
++		gui_send_mouse_event(event.di[0], event.di[1], event.di[2], event.di[3], event.di[4]);
++		gui.didGetChars = 1;
++	} else if (event.type == EVENT_DIAGRESP) {
++		gui.dialogResponse = event.di[0];
++		gui.dialogTextResponse = event.text ? vim_strsave((char_u *) event.text) : NULL;
++	} else if (event.type == EVENT_CLOSE) {
++		gui_shell_closed();
++	} else {
++		assert(false);
++	}
++
++	FreeEvent(event);
++}
++
++void gui_mch_update(void) {
++	// fprintf(stderr, "** UPDATE %d **\n", starting);
++	
++	if (starting != NO_SCREEN) {
++		while (true) {
++			Event event;
++			ssize_t result = read(gui.eventsToVim[0], &event, sizeof(event));
++			// fprintf(stderr, "-- VIM READ %d --\n", (int) result);
++			if (sizeof(Event) == result) { ProcessEventToVim(event); } 
++			else { break; }
++		}
++	}
++}
++
++int gui_mch_wait_for_chars(int wtime) {
++	// fprintf(stderr, "** WAIT %d %d **\n", starting, wtime);
++
++	while (true) {
++		struct pollfd fds[] = { { .fd = gui.eventsToVim[0], .events = POLLIN } };
++		poll(fds, 1, wtime);
++		gui.didGetChars = 0;
++
++		while (true) {
++			Event event;
++			ssize_t result = read(gui.eventsToVim[0], &event, sizeof(event));
++			// fprintf(stderr, "-- READ %d --\n", (int) result);
++			if (sizeof(Event) == result) { ProcessEventToVim(event); } 
++			else { break; }
++		}
++
++		if (gui.didGetChars || wtime > 0) {
++			break;
++		}
++	}
++
++	return gui.didGetChars ? OK : FAIL;
++}
++
++void gui_mch_clear_block(int row1, int col1, int row2, int col2) {
++	// fprintf(stderr, "** CLEAR RECT **\n");
++	SendResizeEvent();
++	Event event = { .type = EVENT_CLEAR, .di = { row1, col1, row2, col2 } };
++	WriteEvent(gui.eventsToUI[1], &event);
++}
++
++void gui_mch_clear_all(void) {
++	// fprintf(stderr, "** CLEAR ALL **\n");
++	// This includes the 'clear area'.
++	gui_mch_clear_block(0, 0, gui.num_rows, gui.num_cols);
++}
++
++void gui_mch_delete_lines(int row, int num_lines) {
++	// fprintf(stderr, "** DELETE %d %d **\n", row, num_lines);
++	Event event = { .type = EVENT_DELETE, .di = { row, num_lines, gui.scroll_region_left, gui.scroll_region_right, gui.scroll_region_bot } };
++	WriteEvent(gui.eventsToUI[1], &event);
++	gui_clear_block(gui.scroll_region_bot - num_lines + 1, gui.scroll_region_left, gui.scroll_region_bot, gui.scroll_region_right);
++}
++
++void gui_mch_insert_lines(int row, int num_lines) {
++	// fprintf(stderr, "** INSERT %d %d **\n", row, num_lines);
++	Event event = { .type = EVENT_INSERT, .di = { row, num_lines, gui.scroll_region_left, gui.scroll_region_right, gui.scroll_region_bot } };
++	WriteEvent(gui.eventsToUI[1], &event);
++	gui_clear_block(row, gui.scroll_region_left, row + num_lines - 1, gui.scroll_region_right);
++}
++
++void gui_mch_getmouse(int *x, int *y) {
++	// TODO Get the mouse position.
++}
++
++void gui_mch_setmouse(int x, int y) {
++	// TODO Set the mouse position.
++}
++
++void gui_mch_mousehide(int hide) {
++	// TODO Set whether the cursor is shown.
++}
++
++// TODO Menu support.
++
++void gui_mch_enable_menu(int flag) {
++}
++
++void gui_mch_set_menu_pos(int x, int y, int w, int h) {
++}
++
++void gui_mch_add_menu(vimmenu_T *menu, int idx) {
++}
++
++void gui_mch_add_menu_item(vimmenu_T *menu, int idx) {
++}
++
++void gui_mch_destroy_menu(vimmenu_T *menu) {
++}
++
++void gui_mch_menu_grey(vimmenu_T *menu, int grey) {
++}
++
++void gui_mch_menu_hidden(vimmenu_T *menu, int hidden) {
++}
++
++void gui_mch_draw_menubar(void) {
++}
++
++void gui_mch_show_popupmenu(vimmenu_T *menu) {
++}
++
++void gui_mch_toggle_tearoffs(int enable) {
++}
++
++void clip_mch_request_selection(Clipboard_T *cbd) {
++	// Get the current selection and put it in the clipboard register.
++
++	PBClipboardReader *reader = PBClipboardRead(PBClipboardID_PRIMARY);
++	if (!reader) { return; }
++
++	PBStr result;
++	int type = MAUTO;
++
++	if (PBClipboardGetItemCount(reader) > 1) {
++		size_t allocated = 1, position = 0;
++		char *combined = (char *) malloc(allocated);
++
++		for (uintptr_t i = 0; i < PBClipboardGetItemCount(reader); i++) {
++			if (PBClipboardGetItemData(reader, i, PB_STR("text/plain"), &result)) {
++				if (position + result.len + 1 > allocated) {
++					while (position + result.len + 1 > allocated) { allocated *= 2; }
++					combined = (char *) realloc(combined, allocated);
++				}
++
++				memcpy(&combined[position], result.ptr, result.len);
++				combined[position + result.len] = '\n';
++				position += result.len + 1;
++				PBHeapFree(result.ptr);
++			}
++		}
++
++		clip_yank_selection(MLINE, (char_u *) combined, position, cbd);
++		// TODO Do we need to free combined?
++	} else {
++		if (PBClipboardGetItemData(reader, 0, PB_STR("application/x-playbit-vim-visual-type"), &result)) {
++			if (result.len == 1 && result.ptr[0] == 'L') { type = MLINE; }
++			if (result.len == 1 && result.ptr[0] == 'C') { type = MCHAR; }
++			if (result.len == 1 && result.ptr[0] == 'B') { type = MBLOCK; }
++			PBHeapFree(result.ptr);
++		}
++
++		if (PBClipboardGetItemData(reader, 0, PB_STR("text/plain"), &result)) {
++			if (type == MAUTO) {
++				type = memchr(result.ptr, result.len, '\n') ? MLINE : MCHAR;
++			}
++
++			clip_yank_selection(type, (char_u *) result.ptr, result.len, cbd);
++			// TODO Do we need to free result.ptr?
++		}
++	}
++
++	PBClipboardReaderRelease(reader);
++}
++
++void clip_mch_set_selection(Clipboard_T *cbd) {
++	// If the '*' register isn't already filled in, fill it in now
++	cbd->owned = TRUE;
++	clip_get_selection(cbd);
++	cbd->owned = FALSE;
++
++	char_u *clipboardString = NULL;
++	long_u clipboardCount;
++	int type = clip_convert_selection(&clipboardString, &clipboardCount, cbd);
++	if (type < 0) { return; }
++	char typeCharacter = type == MBLOCK ? 'B' : type == MCHAR ? 'C' : 'L';
++
++	PBClipboardWriter *writer = PBClipboardBeginWriting();
++	PBClipboardAdd(writer, 0, PB_STR("text/plain"), PB_STR(clipboardString, clipboardCount));
++	PBClipboardAdd(writer, 0, PB_STR("application/x-playbit-vim-visual-type"), PB_STR(&typeCharacter, 1));
++	PBClipboardEndWriting(writer, PBClipboardID_PRIMARY);
++}
++
++void clip_mch_lose_selection(Clipboard_T *cbd) {
++}
++
++int clip_mch_own_selection(Clipboard_T *cbd) {
++	return FAIL;
++}
++
++int gui_mch_dialog(int type, char_u *title, char_u *message, char_u *buttons, int dfltbutton,
++		char_u *textfield, int ex_cmd) {
++	fprintf(stderr, "** DIALOG **\n");
++	fprintf(stderr, "%d '%s' '%s' '%s' %d '%s'\n",
++			type, title, message, buttons, dfltbutton, textfield);
++	char *text = malloc(strlen((char *) title) + 1
++			+ strlen((char *) message) + 1
++			+ strlen((char *) buttons) + 1);
++	strcpy(text, (char *) title);
++	strcpy(text + strlen((char *) title) + 1, (char *) message);
++	strcpy(text + strlen((char *) title) + 1 + strlen((char *) message) + 1, (char *) buttons);
++	Event event = { .type = EVENT_DIALOG, .text = text };
++	WriteEvent(gui.eventsToUI[1], &event);
++	gui.dialogResponse = -1;
++
++	fprintf(stderr, "waiting for dialog response\n");
++
++	while (gui.dialogResponse == -1) {
++		gui_mch_update();
++	}
++
++	fprintf(stderr, "dialog response = %d\n", gui.dialogResponse);
++	return gui.dialogResponse;
++}
++
++char_u *gui_mch_browsedir(char_u *title, char_u *initdir) {
++	Event event = { .type = EVENT_BROWSE, .text = initdir
++		? strdup((const char *) initdir) : NULL, .di = { -1 } };
++	WriteEvent(gui.eventsToUI[1], &event);
++	gui.dialogResponse = -1;
++	while (gui.dialogResponse == -1) { gui_mch_update(); }
++	return gui.dialogTextResponse;
++}
++
++char_u *gui_mch_browse(int saving, char_u *title, char_u *dflt,
++		char_u *ext, char_u *initdir, char_u *filter) {
++	Event event = { .type = EVENT_BROWSE, .text = initdir
++		? strdup((const char *) initdir) : NULL, .di = { saving } };
++	WriteEvent(gui.eventsToUI[1], &event);
++	gui.dialogResponse = -1;
++	while (gui.dialogResponse == -1) { gui_mch_update(); }
++	return gui.dialogTextResponse;
++}
++
++void im_set_position(int row, int col) {
++	// TODO IME support.
++}
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/gui_playbit.h vim90/src/gui_playbit.h
+--- vim90_original/src/gui_playbit.h	1970-01-01 01:00:00
++++ vim90/src/gui_playbit.h	2024-10-10 15:41:00
+@@ -0,0 +1,8 @@
++#define _PB_DECLARE_PRIVATE_APIS
++#include <playbit/playbit.h>
++
++typedef struct UICell {
++	uint32_t foreground, background;
++	int flags;
++	char utf8Bytes[4];
++} UICell;
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/gui_xim.c vim90/src/gui_xim.c
+--- vim90_original/src/gui_xim.c	2022-05-26 13:12:57
++++ vim90/src/gui_xim.c	2024-01-16 13:53:13
+@@ -1809,7 +1809,7 @@
+ #  endif
+ }
+ 
+-#  if defined(FEAT_GUI) && !defined(FEAT_GUI_HAIKU) && !defined(VIMDLL)
++#  if defined(FEAT_GUI) && !defined(FEAT_GUI_PLAYBIT) && !defined(FEAT_GUI_HAIKU) && !defined(VIMDLL)
+     void
+ im_set_position(int row UNUSED, int col UNUSED)
+ {
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/menu.c vim90/src/menu.c
+--- vim90_original/src/menu.c	2022-06-16 11:37:36
++++ vim90/src/menu.c	2024-01-16 13:53:13
+@@ -2567,7 +2567,7 @@
+ 
+ #if defined(FEAT_GUI_MSWIN) || defined(FEAT_GUI_GTK) \
+ 	|| defined(FEAT_TERM_POPUP_MENU) || defined(FEAT_GUI_HAIKU) \
+-	|| defined(FEAT_BEVAL_TIP) || defined(PROTO)
++	|| defined(FEAT_GUI_PLAYBIT) || defined(FEAT_BEVAL_TIP) || defined(PROTO)
+ /*
+  * Given a menu descriptor, e.g. "File.New", find it in the menu hierarchy.
+  */
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/mouse.c vim90/src/mouse.c
+--- vim90_original/src/mouse.c	2022-06-16 11:37:51
++++ vim90/src/mouse.c	2024-01-16 13:53:13
+@@ -561,7 +561,7 @@
+ 		    // menu on the button down event.
+ 		    return FALSE;
+ #  endif
+-#  if defined(FEAT_GUI_MSWIN) || defined(FEAT_GUI_HAIKU)
++#  if defined(FEAT_GUI_MSWIN) || defined(FEAT_GUI_HAIKU) || defined(FEAT_GUI_PLAYBIT)
+ 		if (is_click || is_drag)
+ 		    // Ignore right button down and drag mouse events.  Windows
+ 		    // only shows the popup menu on the button up event.
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/os_unix.c vim90/src/os_unix.c
+--- vim90_original/src/os_unix.c	2022-06-20 15:01:18
++++ vim90/src/os_unix.c	2024-01-16 13:53:13
+@@ -2255,7 +2255,7 @@
+ 	type = 1;
+ #else
+ # if defined(FEAT_GUI_PHOTON) \
+-    || defined(FEAT_GUI_GTK) || defined(FEAT_GUI_HAIKU)
++    || defined(FEAT_GUI_GTK) || defined(FEAT_GUI_HAIKU) || defined(FEAT_GUI_PLAYBIT)
+     if (gui.in_use)
+ 	type = 1;
+ # endif
+@@ -2289,7 +2289,7 @@
+ 	    set_x11_title(title);		// x11
+ #endif
+ #if defined(FEAT_GUI_GTK) || defined(FEAT_GUI_HAIKU) \
+-	|| defined(FEAT_GUI_PHOTON)
++	|| defined(FEAT_GUI_PHOTON) || defined(FEAT_GUI_PLAYBIT)
+ 	else
+ 	    gui_mch_settitle(title, icon);
+ #endif
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/proto/gui_playbit.pro vim90/src/proto/gui_playbit.pro
+--- vim90_original/src/proto/gui_playbit.pro	1970-01-01 01:00:00
++++ vim90/src/proto/gui_playbit.pro	2024-07-01 09:42:19
+@@ -0,0 +1,88 @@
++/* gui_playbit.c - copied from gui_haiku.pro and manually updated */
++
++void gui_mch_prepare(int *argc, char **argv);
++int gui_mch_init(void);
++int gui_mch_open(void);
++void gui_mch_exit(int vim_exitcode);
++int gui_mch_init_check(void);
++void gui_mch_flush(void);
++int gui_mch_is_blink_off(void);
++void gui_mch_new_colors(void);
++void gui_mch_set_bg_color(guicolor_T color);
++void gui_mch_set_fg_color(guicolor_T color);
++void gui_mch_set_sp_color(guicolor_T color);
++guicolor_T gui_mch_get_rgb(guicolor_T pixel);
++guicolor_T gui_mch_get_rgb_color(int r, int g, int b);
++guicolor_T gui_mch_get_color(char_u *name);
++
++GuiFont gui_mch_get_font(char_u *name, int giveErrorIfMissing);
++void gui_mch_set_font(GuiFont font);
++int gui_mch_init_font(char_u *font_name, int fontset);
++void gui_mch_free_font(GuiFont font);
++char_u *gui_mch_get_fontname(GuiFont font, char_u *name);
++
++void gui_mch_set_winpos(int x, int y);
++int gui_mch_get_winpos(int *x, int *y);
++void gui_mch_set_shellsize(int w, int h, int m_w, int m_h, int b_w, int b_h, int d);
++void gui_mch_get_screen_dimensions(int* screen_w, int* screen_h);
++void gui_mch_set_text_area_pos(int x, int y, int w, int h);
++
++void gui_mch_enable_scrollbar(scrollbar_T *sb, int flag);
++
++void gui_mch_set_scrollbar_thumb(scrollbar_T *sb, int val, int size, int max);
++
++void gui_mch_set_scrollbar_pos(scrollbar_T *sb, int x, int y, int w, int h);
++int gui_mch_get_scrollbar_xpadding(void);
++int gui_mch_get_scrollbar_ypadding(void);
++void gui_mch_create_scrollbar(scrollbar_T *sb, int orient);
++void gui_mch_destroy_scrollbar(scrollbar_T *sb);
++
++void gui_mch_set_blinking(long waittime, long on, long off);
++void gui_mch_stop_blink(int may_call_gui_update_cursor);
++void gui_mch_start_blink(void);
++
++int gui_mch_adjust_charheight(void);
++void gui_mch_draw_string(int row, int col, char_u *s, int len, int flags);
++int gui_mch_haskey(char_u *name);
++void gui_mch_beep(void);
++void gui_mch_flash(int msec);
++void gui_mch_invert_rectangle(int r, int c, int nr, int nc);
++void gui_mch_iconify(void);
++void gui_mch_set_foreground(void);
++void gui_mch_settitle(char_u *title, char_u *icon);
++void gui_mch_draw_hollow_cursor(guicolor_T color);
++void gui_mch_draw_part_cursor(int w, int h, guicolor_T color);
++void gui_mch_update(void);
++int gui_mch_wait_for_chars(int wtime);
++void gui_mch_clear_block(int row1, int col1, int row2, int col2);
++void gui_mch_clear_all(void);
++void gui_mch_delete_lines(int row, int num_lines);
++void gui_mch_insert_lines(int row, int num_lines);
++
++void gui_mch_getmouse(int *x, int *y);
++void gui_mch_setmouse(int x, int y);
++void gui_mch_mousehide(int hide);
++
++void gui_mch_enable_menu(int flag);
++void gui_mch_set_menu_pos(int x, int y, int w, int h);
++void gui_mch_add_menu(vimmenu_T *menu, int idx);
++void gui_mch_add_menu_item(vimmenu_T *menu, int idx);
++void gui_mch_destroy_menu(vimmenu_T *menu);
++void gui_mch_menu_grey(vimmenu_T *menu, int grey);
++void gui_mch_menu_hidden(vimmenu_T *menu, int hidden);
++void gui_mch_draw_menubar(void);
++void gui_mch_show_popupmenu(vimmenu_T *menu);
++void gui_mch_toggle_tearoffs(int enable);
++
++void clip_mch_request_selection(Clipboard_T *cbd);
++void clip_mch_set_selection(Clipboard_T *cbd);
++void clip_mch_lose_selection(Clipboard_T *cbd);
++int clip_mch_own_selection(Clipboard_T *cbd);
++
++int gui_mch_dialog(int type, char_u *title, char_u *message, char_u *buttons, int dfltbutton, char_u *textfield, int ex_cmd);
++char_u *gui_mch_browsedir(char_u *title, char_u *initdir);
++char_u * gui_mch_browse( int saving, char_u *title, char_u *dflt, char_u *ext, char_u *initdir, char_u *filter);
++
++void im_set_position(int row, int col);
++
++void gui_shell_closed(void);
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/proto.h vim90/src/proto.h
+--- vim90_original/src/proto.h	2022-04-03 17:11:32
++++ vim90/src/proto.h	2024-01-16 13:53:13
+@@ -296,6 +296,9 @@
+ #  ifdef FEAT_GUI_HAIKU
+ #   include "gui_haiku.pro"
+ #  endif
++#  ifdef FEAT_GUI_PLAYBIT
++#   include "gui_playbit.pro"
++#  endif
+ #  ifdef FEAT_GUI_X11
+ #   include "gui_x11.pro"
+ #  endif
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/version.c vim90/src/version.c
+--- vim90_original/src/version.c	2022-06-28 11:35:11
++++ vim90/src/version.c	2024-01-16 13:53:13
+@@ -1080,6 +1080,8 @@
+     msg_puts(_("with Haiku GUI."));
+ #elif defined(FEAT_GUI_PHOTON)
+     msg_puts(_("with Photon GUI."));
++#elif defined(FEAT_GUI_PLAYBIT)
++    msg_puts(_("with Playbit GUI."));
+ #elif defined(MSWIN)
+     msg_puts(_("with GUI."));
+ #endif
+diff --new-file -u -x *.swp -x .DS_Store -x configure -x autom4te.cache -r vim90_original/src/vim.h vim90/src/vim.h
+--- vim90_original/src/vim.h	2022-06-24 16:14:07
++++ vim90/src/vim.h	2024-01-16 13:53:13
+@@ -117,6 +117,7 @@
+ #if defined(FEAT_GUI_MOTIF) \
+     || defined(FEAT_GUI_GTK) \
+     || defined(FEAT_GUI_HAIKU) \
++    || defined(FEAT_GUI_PLAYBIT) \
+     || defined(FEAT_GUI_MSWIN) \
+     || defined(FEAT_GUI_PHOTON)
+ # if !defined(FEAT_GUI) && !defined(NO_X11_INCLUDES)
+@@ -2174,7 +2175,7 @@
+     int_u	format;		// Vim's own special clipboard format
+     int_u	format_raw;	// Vim's raw text clipboard format
+ # endif
+-# ifdef FEAT_GUI_HAIKU
++# if defined(FEAT_GUI_HAIKU) || defined(FEAT_GUI_PLAYBIT)
+     // No clipboard at the moment. TODO?
+ # endif
+ } Clipboard_T;
+@@ -2264,7 +2265,7 @@
+ // been seen at that stage.  But it must be before globals.h, where error_ga
+ // is declared.
+ #if !defined(MSWIN) && !defined(FEAT_GUI_X11) && !defined(FEAT_GUI_HAIKU) \
+-	&& !defined(FEAT_GUI_GTK) && !defined(PROTO)
++	&& !defined(FEAT_GUI_PLAYBIT) && !defined(FEAT_GUI_GTK) && !defined(PROTO)
+ # define mch_errmsg(str)	fprintf(stderr, "%s", (str))
+ # define display_errors()	fflush(stderr)
+ # define mch_msg(str)		printf("%s", (str))

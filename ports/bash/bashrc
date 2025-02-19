@@ -1,0 +1,15 @@
+umask 022
+
+# Unless running interactively, stop here
+[ -z "$PS1" ] && return
+
+export HISTCONTROL=ignoredups:ignorespace
+HISTSIZE=4000
+HISTFILESIZE=8000
+shopt -s checkwinsize cmdhist histappend
+
+export PS1='\h \w \$ '
+[[ "$TERM" == *xterm* ]] && PS1="\[\e[33;1m\]$PS1\[\e[0m\]"
+
+alias l='ls -lhF --color=auto'
+alias ll='ls -lhFA --color=auto'

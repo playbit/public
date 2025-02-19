@@ -1,0 +1,42 @@
+Adds recognition of "ARCH-unknown-playbit" targets to configure script
+
+--- a/configure	2024-09-12 15:02:44.000000000 -0700
++++ b/configure	2024-09-12 15:08:03.000000000 -0700
+@@ -4264,7 +4264,7 @@
+ 	*-*-linux-android*)
+ 		ac_sys_system=Linux-android
+ 		;;
+-	*-*-linux*)
++	*-*-linux*|*-playbit*)
+ 		ac_sys_system=Linux
+ 		;;
+ 	*-*-cygwin*)
+@@ -4323,7 +4323,7 @@
+ 
+ if test "$cross_compiling" = yes; then
+ 	case "$host" in
+-	*-*-linux*)
++	*-*-linux*|*-playbit*)
+ 		case "$host_cpu" in
+ 		arm*)
+ 			_host_cpu=arm
+--- a/configure.ac	2024-09-12 15:37:34.000000000 -0700
++++ b/configure.ac	2024-09-12 15:37:36.000000000 -0700
+@@ -544,7 +544,7 @@
+ 	*-*-linux-android*)
+ 		ac_sys_system=Linux-android
+ 		;;
+-	*-*-linux*)
++	*-*-linux*|*-playbit*)
+ 		ac_sys_system=Linux
+ 		;;
+ 	*-*-cygwin*)
+@@ -601,7 +601,7 @@
+ AC_SUBST([_PYTHON_HOST_PLATFORM])
+ if test "$cross_compiling" = yes; then
+ 	case "$host" in
+-	*-*-linux*)
++	*-*-linux*|*-playbit*)
+ 		case "$host_cpu" in
+ 		arm*)
+ 			_host_cpu=arm

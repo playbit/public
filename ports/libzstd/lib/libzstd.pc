@@ -1,0 +1,12 @@
+prefix=/
+exec_prefix=/
+includedir=/usr/include
+libdir=/lib
+
+Name: zstd
+Description: fast lossless compression algorithm library
+Version: 1.5.6
+URL: https://facebook.github.io/zstd/
+Libs: -L${libdir} -lzstd
+Libs.private: -pthread
+Cflags: -I${includedir}

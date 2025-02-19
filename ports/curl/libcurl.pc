@@ -1,0 +1,14 @@
+prefix=/
+exec_prefix=/
+includedir=/usr/include
+libdir=/lib
+supported_protocols="FILE FTP FTPS HTTP HTTPS IPFS IPNS MQTT TFTP WS WSS"
+supported_features="AsynchDNS HSTS HTTP2 IPv6 Largefile NTLM SSL TLS-SRP UnixSockets alt-svc libz threadsafe zstd"
+
+Name: libcurl
+URL: https://curl.se/
+Description: Library to transfer files with ftp, http, etc.
+Version: 8.7.1
+Libs: -L${libdir} -lcurl -lcares -lnghttp2 -lssl -lcrypto -lssl -lcrypto -lzstd -lz -lbrotlicommon -lbrotlidec
+Libs.private: -lcares -lnghttp2 -lssl -lcrypto -lssl -lcrypto -lzstd -lz -lbrotlicommon -lbrotlidec
+Cflags: -I${includedir} -DCURL_STATICLIB

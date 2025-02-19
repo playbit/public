@@ -1,0 +1,4 @@
+* linguist-vendored
+Makefile -linguist-vendored
+upgrade-bash.sh -linguist-vendored
+bashrc -linguist-vendored

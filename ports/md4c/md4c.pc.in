@@ -1,0 +1,13 @@
+prefix=/usr
+exec_prefix=${prefix}
+libdir=/
+includedir=${prefix}/include
+
+Name: md4c
+Description: Markdown parser library with a SAX-like callback-based interface
+Version: @VERSION@
+URL: https://github.com/mity/md4c
+
+Requires:
+Libs: -L${libdir} -lmd4c
+Cflags: -I${includedir}

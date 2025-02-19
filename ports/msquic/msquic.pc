@@ -1,0 +1,12 @@
+prefix=/
+exec_prefix=/
+includedir=/usr/include
+libdir=/lib
+
+Name: msquic
+Description: QUIC library
+Version: @VERSION@
+URL: https://github.com/microsoft/msquic
+Libs: -lssl
+Libs.private:
+Cflags:

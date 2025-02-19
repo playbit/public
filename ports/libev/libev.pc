@@ -1,0 +1,10 @@
+prefix=/
+exec_prefix=/
+includedir=/usr/include
+libdir=/lib
+
+Name: libev
+Description: High-performance event loop/event model
+Version: 4.33
+Cflags: -I${includedir}
+Libs: -L${libdir} -lev

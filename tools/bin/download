@@ -1,0 +1,134 @@
+#!/bin/sh
+set -euo pipefail
+DOWNLOAD_DIR=/var/pbuild/_pbuild.shared/download
+if [ "${PBUILD_CHROOT:-}" = "1" ]; then
+	DOWNLOAD_DIR=/build/shared/download
+elif [ "$USER" != root ]; then
+	DOWNLOAD_DIR=$(dirname "$(realpath "$0")")/../../_build/download
+	mkdir -p "$DOWNLOAD_DIR"
+	DOWNLOAD_DIR=$(realpath "$DOWNLOAD_DIR")
+fi
+
+QUIET=false
+VERBOSE=false
+SHA256=
+OUTFILE=
+FORCE=false
+URL=
+
+_err() { echo "$0:" "$@" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do case "$1" in
+	-h|--help)
+		cat <<- _HELP_
+Download files
+usage: $0 [options] <url>
+options:
+	--sha256 <checksum>  Fail if sha256 checksum does not match <checksum>
+	-o <file>            Save result at <file> instead of $DOWNLOAD_DIR/basename(<url>)
+	-q                   Quiet (only print errors)
+	-v                   Verbose (print extra info)
+	-f, --force          Download even when <file> exists
+	-h, --help           Show help and exit
+_HELP_
+		exit ;;
+	--sha256) [ $# -gt 1 ] || _err "missing <checksum>"; SHA256=$2; shift; shift;;
+	-o) [ $# -gt 1 ] || _err "missing <file>"; OUTFILE=$2; shift; shift;;
+	-q) VERBOSE=false; QUIET=true; shift ;;
+	-v) VERBOSE=true; QUIET=false; shift ;;
+	-f|--force) FORCE=true; shift ;;
+	-*) _err "unknown option $1 (see $0 --help)" ;;
+	*) [ -z "$URL" ] || _err "unexpected argument $1 (see $0 --help)"; URL=$1; shift;;
+esac; done
+
+[ -n "$URL" ] || _err "missing <url>"
+[ -n "$OUTFILE" ] || OUTFILE=$DOWNLOAD_DIR/$(basename "$URL")
+if $QUIET; then
+	_log() { true; }
+	_vlog() { true; }
+	_log_download() { true; }
+	_log_verify() { true; }
+else
+	_log() { echo "$@"; }
+	if $VERBOSE; then
+		_vlog() { echo "$@"; }
+		_log_download() { echo "Download $1 -> ${2##$PWD/}"; }
+		_log_verify() { echo "Verifying checksum of $1 (sha256=$2)"; }
+	else
+		_vlog() { true; }
+		_log_download() { echo "Download $1"; }
+		_log_verify() { echo "Verifying checksum of $1"; }
+	fi
+fi
+
+OUTDIR=$(dirname "$OUTFILE")
+
+if ! command -v curl > /dev/null; then
+	echo "curl not found in PATH" >&2
+	if [ -n "${PBUILD_CHROOT:-}" ]; then
+		echo "Enable curl by adding a pbuild directive to your build file:" >&2
+		echo "  #!BUILDTOOL ports/curl" >&2
+	fi
+	exit 1
+fi
+
+fetch="curl -L --fail"
+if $QUIET; then
+	fetchfg="$fetch --silent"
+else
+	fetchfg="$fetch -#"
+fi
+
+if [ -z "$SHA256" ]; then
+	case "$URL" in
+		*.sig|*.sha1|*.sha256|*.sha512)
+			;;
+		# *://files.playb.it/*)
+		# 	# automatic checksum file fetching
+		# 	URL2=${URL/http:/https:}.sha256
+		# 	_log "Read checksum from $URL2"
+		# 	SHA256=$($fetch --silent -o- "$URL2" || true)
+		# 	if [ -z "$SHA256" ]; then
+		# 		# show error
+		# 		$fetch --no-progress-meter -o /dev/null "$URL2"
+		# 		exit 1
+		# 	fi
+		# 	;;
+	esac
+	if [ -z "$SHA256" ]; then
+		if ! $FORCE && [ -e "$OUTFILE" ]; then
+			_vlog "Using existing file: $OUTFILE"
+			exit 0
+		fi
+		_log_download "$URL" "$OUTFILE"
+		mkdir -p "$OUTDIR"
+		exec $fetchfg -o "$OUTFILE" "$URL"
+	fi
+fi
+
+if ! $FORCE && [ -e "$OUTFILE" ]; then
+	_log_verify "$OUTFILE" "$SHA256"
+	ACTUAL_SHA256=$(sha256sum "$OUTFILE"); ACTUAL_SHA256=${ACTUAL_SHA256%% *}
+	if [ "$ACTUAL_SHA256" = "$SHA256" ]; then
+		exit 0
+	fi
+fi
+
+_log_download "$URL" "$OUTFILE"
+mkdir -p "$OUTDIR"
+TEMPFILE=$(mktemp "$OUTDIR/tmp-$(basename "$OUTFILE").XXXXXX")
+trap "rm -f '$TEMPFILE'" EXIT
+WGETFLAGS=; $QUIET || WGETFLAGS="--show-progress --progress=bar:noscroll"
+$fetchfg -o "$TEMPFILE" "$URL"
+ACTUAL_SHA256=$(sha256sum "$TEMPFILE"); ACTUAL_SHA256=${ACTUAL_SHA256%% *}
+
+_log_verify "$OUTFILE" "$SHA256"
+
+if [ "$ACTUAL_SHA256" != "$SHA256" ]; then
+	echo "$URL: sha256 checksum mismatch" >&2
+	echo "  actual:   $ACTUAL_SHA256" >&2
+	echo "  expected: $SHA256" >&2
+	exit 1
+fi
+
+mv "$TEMPFILE" "$OUTFILE"

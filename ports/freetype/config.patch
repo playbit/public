@@ -1,0 +1,32 @@
+
+--- freetype-2.13.2.orig/include/freetype/config/ftoption.h	2023-05-23 12:05:51
++++ freetype-2.13.2/include/freetype/config/ftoption.h	2023-10-31 13:54:34
+@@ -109,7 +109,7 @@
+    * ```
+    *
+    */
+-#define FT_CONFIG_OPTION_ENVIRONMENT_PROPERTIES
++/* #define FT_CONFIG_OPTION_ENVIRONMENT_PROPERTIES */
+ 
+ 
+   /**************************************************************************
+@@ -290,7 +290,7 @@
+    *   options set by those programs have precedence, overwriting the value
+    *   here with the configured one.
+    */
+-/* #define FT_CONFIG_OPTION_USE_HARFBUZZ */
++#define FT_CONFIG_OPTION_USE_HARFBUZZ
+ 
+ 
+   /**************************************************************************
+--- freetype-2.13.2_original/modules.cfg	2023-07-07 06:00:40
++++ freetype-2.13.2/modules.cfg	2023-10-31 14:00:36
+@@ -79,7 +79,7 @@
+ ####
+ 
+ # FreeType's auto hinter.
+-HINTING_MODULES += autofit
++# HINTING_MODULES += autofit
+ 
+ # PostScript hinter.
+ HINTING_MODULES += pshinter

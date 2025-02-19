@@ -1,0 +1,12 @@
+prefix=/
+exec_prefix=/
+includedir=/usr/include
+libdir=/lib
+
+Name: liburing
+Version: 2.6
+Description: io_uring library
+URL: https://git.kernel.dk/cgit/liburing/
+
+Libs: -L${libdir} -luring
+Cflags: -I${includedir}

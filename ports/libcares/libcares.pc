@@ -1,0 +1,12 @@
+prefix=/
+exec_prefix=/
+includedir=/usr/include
+libdir=/lib
+
+Name: c-ares
+URL: http://c-ares.org/
+Description: asynchronous DNS lookup library
+Version: 1.28.1
+Cflags: -I${includedir} 
+Libs: -L${libdir} -lcares
+Libs.private: -lpthread 

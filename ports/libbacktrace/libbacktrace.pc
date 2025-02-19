@@ -1,0 +1,12 @@
+prefix=/
+exec_prefix=/
+includedir=/usr/include
+libdir=/lib
+
+Name: libbacktrace
+Version: 2024.3.8
+Description: produces symbolic backtraces
+URL: https://github.com/ianlancetaylor/libbacktrace
+
+Libs: -L${libdir} -lbacktrace -lunwind
+Cflags: -I${includedir} -funwind-tables

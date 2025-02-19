@@ -1,0 +1,26 @@
+# [user]
+# 	email = your@email
+# 	name = Your Name
+
+[core]
+	whitespace = trailing-space,space-before-tab
+	excludesfile = ~/.gitignore
+	autocrlf = input
+
+[branch]
+	autosetuprebase = always
+
+[branch "master"]
+	remote = origin
+
+[branch "main"]
+	remote = origin
+
+[init]
+	defaultBranch = main
+
+[pull]
+	rebase = true
+
+[push]
+	default = current
