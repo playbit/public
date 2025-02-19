@@ -62,8 +62,6 @@ pbuild_configure_once \
 
 make -j$MAXJOBS
 
-exit 0
-
 mkdir -p $DESTDIR/bin $DESTDIR/sbin
 [ -L $DESTDIR/usr/bin ] || ln -s ../bin $DESTDIR/usr/bin
 [ -L $DESTDIR/usr/sbin ] || ln -s ../sbin $DESTDIR/usr/sbin
