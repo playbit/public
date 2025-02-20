@@ -9,10 +9,12 @@
 source /p/tools/pbuild.lib.sh
 
 VERSION=0.23.6
-curl -L https://github.com/tree-sitter/tree-sitter-python/archive/refs/tags/v$VERSION.tar.gz > tree-sitter-python.tar.gz
-tar -xaf tree-sitter-python.tar.gz
-ls -l
-cd tree-sitter-python-$VERSION
+
+pbuild_fetch_and_unpack \
+	https://github.com/tree-sitter/tree-sitter-python/archive/refs/tags/v$VERSION.tar.gz \
+	630a0f45eccd9b69a66a07bf47d1568e96a9c855a2f30e0921c8af7121e8af96 \
+	tree-sitter-python-$VERSION.tar.gz
+
 PREFIX=/usr make -j$MAXJOBS
 PREFIX=/usr make -j$MAXJOBS install DESTDIR=$DESTDIR
 rm $DESTDIR/$PREFIX/lib/libtree-sitter*.so*
