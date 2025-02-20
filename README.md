@@ -1,14 +1,13 @@
 # Playbit open source
 
-This repository serves two purposes:
-1. Houses open-source software components of Playbit
-2. Public bug tracker: Please [file issues](https://github.com/playbit/public/issues) with care and love.
+This repository houses open-source software components of Playbit.
+Many parts of Playbit are still closed source, though we are committed to opening that source up in the future.
 
 
 ## Setting up for development
 
-For Playbit 0.7.x and older, you need to connect a terminal from your host machine into playbit's root system.
-With playbit running, open a terminal on your host machine, `cd` to this `ports` directory and run `tools/root-vconsole`:
+For Playbit 0.7.x and older, you need to connect a terminal from your host machine into Playbit's root system.
+With Playbit running, open a terminal on your host machine, `cd` to this `pb-src` directory and run `tools/root-vconsole`:
 
 ```
 $ tools/root-vconsole
@@ -17,8 +16,8 @@ Press RETURN if you don't see a prompt. Press ctrl-Q to end session.
 Set terminal size with: stty rows 38 cols 80
 $ grep -F PRETTY_NAME /etc/os-release
 PRETTY_NAME="Playbit v0.7.1"
-$ git clone https://github.com/playbit/pb.git
-$ cd pb
+$ git clone https://github.com/playbit/pb-src.git
+$ cd pb-src
 ```
 
 Software is organized as discreet components called "packages."
