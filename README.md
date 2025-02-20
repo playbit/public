@@ -10,7 +10,7 @@ This repository serves two purposes:
 For Playbit 0.7.x and older, you need to connect a terminal from your host machine into playbit's root system.
 With playbit running, open a terminal on your host machine, `cd` to this `ports` directory and run `tools/root-vconsole`:
 
-```shell
+```
 $ tools/root-vconsole
 Connecting to Playbit root system console...
 Press RETURN if you don't see a prompt. Press ctrl-Q to end session.
@@ -29,7 +29,7 @@ Packages are built using `tools/pbuild` inside sandboxes (chroot with overlayfs,
 
 For example, try building curl:
 
-```shell
+```
 $ tools/pbuild ports/curl
 checking sources ...
 building ports/libc ...
