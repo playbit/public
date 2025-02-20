@@ -1,4 +1,5 @@
 #!BOOTSTRAP
+#!BUILDTOOL src/cc if HERMETIC
 #!DEP ports/libc
 include ../../tools/playbit.defs.mk
 
