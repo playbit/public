@@ -7,10 +7,12 @@ Many parts of Playbit are still closed source, though we are committed to openin
 ## Setting up for development
 
 For Playbit 0.7.x and older, you need to connect a terminal from your host machine into Playbit's root system.
-With Playbit running, open a terminal on your host machine, `cd` to this `pb-src` directory and run `tools/root-vconsole`:
+With Playbit running, open a terminal on your host machine and do the following:
 
 ```
-$ tools/root-vconsole
+$ curl -L#O https://github.com/playbit/pb-src/raw/refs/heads/main/tools/root-vconsole
+$ chmod +x root-vconsole
+$ ./root-vconsole
 Connecting to Playbit root system console...
 Press RETURN if you don't see a prompt. Press ctrl-Q to end session.
 Set terminal size with: stty rows 38 cols 80
