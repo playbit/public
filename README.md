@@ -15,10 +15,10 @@ $ tools/root-vconsole
 Connecting to Playbit root system console...
 Press RETURN if you don't see a prompt. Press ctrl-Q to end session.
 Set terminal size with: stty rows 38 cols 80
-~ $ grep -F PRETTY_NAME /etc/os-release
+$ grep -F PRETTY_NAME /etc/os-release
 PRETTY_NAME="Playbit v0.7.1"
-~ $ git clone https://github.com/playbit/pb.git
-~ $ cd pb
+$ git clone https://github.com/playbit/pb.git
+$ cd pb
 ```
 
 Software is organized as discreet components called "packages."
@@ -30,14 +30,14 @@ Packages are built using `tools/pbuild` inside sandboxes (chroot with overlayfs,
 For example, try building curl:
 
 ```shell
-~ $ tools/pbuild ports/curl
+$ tools/pbuild ports/curl
 checking sources ...
 building ports/libc ...
 ...
 building ports/curl: OK /var/pbuild/ports/curl.ARCH/out
-~ $ /var/pbuild/ports/curl.$(uname -m)/out/distroot/bin/curl --version
+$ /var/pbuild/ports/curl.$(uname -m)/out/distroot/bin/curl --version
 curl 8.7.1 ...
-~ $
+$
 ```
 
 See [`ports/README.md`](ports/README.md) for details on building & developing ports.
