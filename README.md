@@ -12,6 +12,25 @@ where their declared dependencies are present.
 [pbuild](tools/pbuild.md) ensures that packages are built in dependency order.
 
 
+## Setting up for development
+
+For Playbit 0.7.x and older, you need to connect a terminal from your host machine into playbit's root system.
+With playbit running, open a terminal on your host machine, `cd` to this `ports` directory and run `tools/root-vconsole`:
+
+```shell
+$ tools/root-vconsole
+Connecting to Playbit root system console...
+Press RETURN if you don't see a prompt. Press ctrl-Q to end session.
+Set terminal size with: stty rows 38 cols 80
+~ $ grep -F PRETTY_NAME /etc/os-release
+PRETTY_NAME="Playbit v0.7.1"
+~ $ git clone https://github.com/playbit/ports.git
+~ $ cd ports
+```
+
+You are now ready to [build ports](#building-a-port)
+
+
 ## Building a port
 
 `tools/pbuild port/PORTNAME` builds `port/PORTNAME` and any outdated dependencies.
