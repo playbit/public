@@ -45,7 +45,7 @@ See [`ports/README.md`](ports/README.md) for details on building & developing po
 
 ## License
 
-Subdirectories may be covered by a specific licenses, declared in files named
+Subdirectories may be covered by specific licenses, declared in files named
 "LICENSE.txt" or "COPYING" (or similar.)
 
 All other material in this repository is covered by the Apache 2 license,
