@@ -16,8 +16,6 @@ $ ./root-vconsole
 Connecting to Playbit root system console...
 Press RETURN if you don't see a prompt. Press ctrl-Q to end session.
 Set terminal size with: stty rows 38 cols 80
-$ grep -F PRETTY_NAME /etc/os-release
-PRETTY_NAME="Playbit v0.7.1"
 $ git clone https://github.com/playbit/pb-src.git
 $ cd pb-src
 ```
