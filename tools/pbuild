@@ -2888,13 +2888,13 @@ def install(buildlist: Seq[PkgBuild], dstdir: str):
 	noinstall_pkg_names = (
 		'src/cc',
 		'src/rootfs',
-		'src/libc',
 		'src/kernel-headers',
+		'ports/libc',
 		'ports/busybox',
 	)
 	dstdir = str(Path(dstdir).resolve())
 	seen = set()
-	for b, build_reason in buildlist:
+	for b in buildlist:
 		if not b.is_toplevel or b in seen:
 			continue
 		seen.add(b)
@@ -2952,7 +2952,7 @@ def init_builddir():
 
 def pbuild_of_playbit_system_src():
 	try:
-		with (PBUILD_DIR.parent / '.git' / 'config').open() as f:
+		with (SRCROOT / '.git' / 'config').open() as f:
 			return f.read().find('url = git@github.com:playbit/playbit.git') > -1
 	except:
 		return False
@@ -3048,12 +3048,6 @@ async def main():
 	if not PLATFORM_IS_PLAYBIT:
 		CHROOT = '/usr/sbin/chroot'
 
-	global HERMETIC
-	if args.hermetic is not None:
-		HERMETIC = args.hermetic != '' and args.hermetic[0] not in ('f', 'n', '0')
-	elif not PLATFORM_IS_PLAYBIT or pbuild_of_playbit_system_src():
-		HERMETIC = True
-
 	global DRYRUN
 	DRYRUN = True if args.dry_run else False
 
@@ -3067,6 +3061,12 @@ async def main():
 			# make sure all packages mentioned are rooted in the same project
 			log(f"error: Mixed SRCROOT: {str(SRCROOT)!r}, {str(srcroot)!r}", color='red')
 			sys.exit(1)
+
+	global HERMETIC
+	if args.hermetic is not None:
+		HERMETIC = args.hermetic != '' and args.hermetic[0] not in ('f', 'n', '0')
+	elif not PLATFORM_IS_PLAYBIT or pbuild_of_playbit_system_src():
+		HERMETIC = True
 
 	global BUILDDIR
 	if args.build_dir:
@@ -3198,6 +3198,7 @@ async def main():
 			raise e
 
 		cleanup_only = []
+		buildlist1 = buildlist
 		buildlist = select_what_to_build(buildlist, cleanup_only)
 
 		build_ok = True
@@ -3207,7 +3208,7 @@ async def main():
 
 		if build_ok and args.install:
 			with timing.restart("install"):
-				install(buildlist, args.install)
+				install(buildlist1, args.install)
 
 		timing.restart("cleanup")
 		if build_ok:
