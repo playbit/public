@@ -1,0 +1,93 @@
+#!/bin/bash
+set -eo pipefail
+
+_err() { echo "$0:" "$@" >&2; exit 1; }
+_relpath() {
+    case "$1" in "$PWD/"*)  echo ".${1:${#PWD}}" ;;
+                 "$HOME/"*) echo "~${1:${#HOME}}" ;;
+                 *)         echo "$1" ;;
+    esac
+}
+
+# default socket file
+case "$(uname -s)" in
+    Darwin)
+        SOCKFILE="$HOME/Library/Application Support/Playbit/vconsole0.sock"
+        ;;
+    *)
+        SOCKFILE="$(cd "$(dirname "$0")"; pwd)/vconsole0.sock"
+        ;;
+esac
+
+# check command-line arguments
+while [ $# -gt 0 ]; do case "$1" in
+    -h|-help|--help) cat <<END
+Connect a terminal to a running playbit instance's root system
+Usage: $0 [--help | <sockfile>]
+<sockfile> defualts to $(_relpath "$SOCKFILE")
+Once in playbit, press ctrl-Q to disconnect (quit the session.)
+Bugs? Open an issue and include the output of running \`bash -x $0\`
+END
+    exit 0;;
+    -*) _err "unknown option: $1";;
+    *)  [ -z "$SOCKFILE" ] || _err "unexpected argument: $1"
+        SOCKFILE=$(realpath "$SOCKFILE"); shift
+        CUSTOM_SOCKFILE=1
+        ;;
+esac; done
+
+# check for socat program
+if ! command -v socat >/dev/null; then
+    echo "$0: socat not found in PATH" >&2
+    echo -n "Please install 'socat'"
+    case "$(uname -s)" in
+        Darwin)
+            echo ": brew install socat"
+            ;;
+        *)
+            echo " for your distribution. Examples:"
+            echo "  apt install socat"
+            echo "  apk add socat"
+            echo "  pacman -S socat"
+            echo "  pkg install socat"
+            echo >&2
+            ;;
+    esac
+    exit 1
+fi
+
+# check socket file
+SOCKFILE=$(realpath "$SOCKFILE")
+if [ ! -S "$SOCKFILE" ]; then
+    if [ -e "$SOCKFILE" ]; then
+        echo "Playbit is not running ($(_relpath "$SOCKFILE") not found)" >&2
+    else
+        echo "Playbit is not running ($(_relpath "$SOCKFILE") is not a socket)$HELP" >&2
+    fi
+    [ -n "$CUSTOM_SOCKFILE" ] ||
+        echo "Try passing it as an argument (see $0 --help)" >&2
+    exit 1
+fi
+
+# setup socat greeting (only effective if socat has been patched with this feature)
+SOCAT_GREETING=
+STTY_CMD=
+TERMSIZE=$(stty size 2>/dev/null)
+if [ -n "$TERMSIZE" ]; then
+    STTY_CMD="stty rows ${TERMSIZE% *} cols ${TERMSIZE#* }"
+    SOCAT_GREETING="$STTY_CMD; "
+fi
+SOCAT_GREETING="${SOCAT_GREETING}export TERM='"$TERM"'$(printf "\n")"
+export SOCAT_GREETING
+
+# switch execution to socat
+echo "Connecting to Playbit root system console..."
+echo "Press RETURN if you don't see a prompt. Press ctrl-Q to end session."
+[ -z "$STTY_CMD" ] ||
+    echo "Set terminal size with: $STTY_CMD"
+exec socat -g -t0.1 -,escape=0x11,rawer,icanon=0 \
+    "unix-connect:${SOCKFILE//,/\\,},nonblock,escape=0x11"
+
+# Note: 0x04 is ^D, the End-of-Transmission character (EOT)
+# Note: 0x11 is ^Q, the Transmit On character (XON)
+# Note: -t0.1 makes exiting quicker (time to wait before exiting after EOF)
