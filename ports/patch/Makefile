@@ -1,4 +1,9 @@
 #!BOOTSTRAP
+#!BUILDTOOL src/cc if HERMETIC
+#!BUILDTOOL ports/libc if HERMETIC
+#!BUILDTOOL ports/busybox if HERMETIC
+#!DEP src/kernel-headers if HERMETIC
+#
 #!BUILDTOOL ports/make
 #!DEP ports/libc [transitive]
 include ../../tools/playbit.defs.mk
