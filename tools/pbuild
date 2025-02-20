@@ -621,7 +621,9 @@ def setup_whiteout_dir() -> Path:
 		whiteout_dir.mkdir(parents=True, exist_ok=True)
 		for path in WHITEOUT_DIRS:
 			try:
-				os.mknod(f"{whiteout_dir}/{path}", mode=stat.S_IFCHR, device=0)
+				path = f"{whiteout_dir}/{path}"
+				mkdirs(Path(path).parent)
+				os.mknod(path, mode=stat.S_IFCHR, device=0)
 			except:
 				if VERBOSE:
 					log(f"warning: mknod({whiteout_dir}/{path}) failed")
