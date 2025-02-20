@@ -6,7 +6,7 @@
 #!BUILDTOOL ports/autoconf
 #
 #!DEP ports/libc [transitive]
-#!DEP ports/libncurses [transitive]
+#!DEP ports/libncurses
 #!DEP flute [transitive] if HERMETIC
 #
 source /p/tools/pbuild.lib.sh
