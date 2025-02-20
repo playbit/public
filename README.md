@@ -44,6 +44,37 @@ $
 See [`ports/README.md`](ports/README.md) for details on building & developing ports.
 
 
+## Installing build products
+
+Since packages are built in sandboxes, they are not installed on the system by default.
+This ensures that your workspace stays unaffected.
+
+To install a package to be used in a workspace, ask pbuild to `--install` it for you.
+For example to install GVIM:
+
+```
+$ tools/pbuild ports/gvim --install=$HOME/ws_S/upper/devel
+building ports/gvim.aarch64: OK /var/pbuild/ports/gvim.aarch64/out/distroot 32.6M
+Install ports/gvim at /home/root/ws_S/upper/devel
+```
+
+You can now go to `/devel/Workspace/Applications` in Playbit and open `GVIM`.
+
+We recommend installing into a separate root `$HOME/ws_S/upper/devel` so that you don't overwrite
+libraries and programs in your workspace.
+
+However, workspace files can recovered even if you accidentally do `rm -rf /` in a workspace.
+This is possible because each workspace stores file system modifications as a "difference layer"
+rather than actually removing or changing system files.
+A workspace's file changes can be managed from the root system at `/home/root/ws_S/upper`.
+
+- To install software from source directly into your workspace:
+  `tools/pbuild ports/gvim --install=$HOME/ws_S/upper`
+- To recover an accidentally deleted file: `rm /home/root/ws_S/upper/PATH/TO/DELETED/FILE`
+- To completely reset a workspace: `rm -r /home/root/ws_S/upper/*`
+  **DANGER!** Removes any files you may have created
+
+
 ## License
 
 Subdirectories may be covered by specific licenses, declared in files named
