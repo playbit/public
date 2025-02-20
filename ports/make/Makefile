@@ -1,4 +1,7 @@
 #!BOOTSTRAP
+#!BUILDTOOL src/cc if HERMETIC
+#!BUILDTOOL ports/busybox if HERMETIC
+#
 #!DEP ports/libc [transitive]
 #!DEP ports/libunwind
 include ../../tools/playbit.defs.mk
