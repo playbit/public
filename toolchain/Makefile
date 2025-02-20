@@ -1,5 +1,5 @@
 #
-# This is a metapackage intended to be used as #!BUILDTOOL toolchain
+# This is a metapackage intended to be used as: #!BUILDTOOL toolchain
 #
 #!METAPACKAGE
 #!DEP ports/make [transitive]
