@@ -1,0 +1,23 @@
+Enables calling dropbear as ssh-server
+
+--- a/src/dbmulti.c	2025-02-21 14:42:12.000000000 -0800
++++ b/src/dbmulti.c	2025-02-21 14:41:23.000000000 -0800
+@@ -30,7 +30,8 @@
+ 	*match = DROPBEAR_SUCCESS;
+ 
+ #ifdef DBMULTI_dropbear
+-		if (strcmp(progname, "dropbear") == 0) {
++		if (strcmp(progname, "dropbear") == 0
++				|| strcmp(progname, "ssh-server") == 0) {
+ 			return dropbear_main(argc, argv, multipath);
+ 		}
+ #endif
+@@ -83,7 +84,7 @@
+ 			"Make a symlink pointing at this binary with one of the\n"
+ 			"following names or run 'dropbearmulti <command>'.\n"
+ #ifdef DBMULTI_dropbear
+-			"'dropbear' - the Dropbear server\n"
++			"'dropbear' or 'ssh-server' - the Dropbear server\n"
+ #endif
+ #ifdef DBMULTI_dbclient
+ 			"'dbclient' or 'ssh' - the Dropbear client\n"

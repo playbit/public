@@ -1,0 +1,24 @@
+When running dropbear as a child of a process locked down with Linux user
+namespace (CLONE_NEWUSER), setgid(0) & setuid(0) fails even when getgid()
+and getuid() is 0.
+
+--- a/src/svr-chansession.c	2024-10-22 07:30:00.000000000 -0700
++++ b/src/svr-chansession.c	2025-02-21 08:02:02.000000000 -0800
+@@ -984,12 +984,13 @@
+ 	/* We can only change uid/gid as root ... */
+ 	if (getuid() == 0) {
+ 
+-		if ((setgid(ses.authstate.pw_gid) < 0) ||
+-			(initgroups(ses.authstate.pw_name, 
+-						ses.authstate.pw_gid) < 0)) {
++		if (ses.authstate.pw_gid != 0 &&
++		    ((setgid(ses.authstate.pw_gid) < 0) ||
++		     (initgroups(ses.authstate.pw_name,
++		                 ses.authstate.pw_gid) < 0))) {
+ 			dropbear_exit("Error changing user group");
+ 		}
+-		if (setuid(ses.authstate.pw_uid) < 0) {
++		if (ses.authstate.pw_uid != 0 && setuid(ses.authstate.pw_uid) < 0) {
+ 			dropbear_exit("Error changing user");
+ 		}
+ 	} else {
