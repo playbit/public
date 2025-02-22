@@ -3,7 +3,7 @@
 #
 #!BUILDTOOL toolchain
 #!BUILDTOOL ports/curl if HERMETIC
-#!BUILDTOOL ports/perl
+#!BUILDTOOL ports/perl if HERMETIC
 #!BUILDTOOL ports/m4
 #
 #!DEP ports/m4 [transitive]

@@ -5,7 +5,7 @@
 # fetch the openssl sources.
 #!BOOTSTRAP
 #!BUILDTOOL toolchain
-#!BUILDTOOL ports/perl
+#!BUILDTOOL ports/perl if HERMETIC
 #!DEP ports/libc [transitive]
 #
 include ../../tools/playbit.defs.mk

@@ -3,7 +3,7 @@
 #
 #!BUILDTOOL toolchain
 #!BUILDTOOL ports/curl if HERMETIC
-#!BUILDTOOL ports/perl
+#!BUILDTOOL ports/perl if HERMETIC
 # perl needed for tests with "make regress"
 #
 #!DEP ports/libc [transitive]
