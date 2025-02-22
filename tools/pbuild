@@ -264,7 +264,8 @@ def libc_mount(source, target, fs='', flags=0, options=''):
 		log(msg)
 	target_bin = target.encode()
 	if libc.mount(source.encode(), target_bin, fs.encode(), flags, options.encode()) < 0:
-		libc_raise_errno(f"Error mounting {source!r} ({fs}) on {target!r} with options {options!r}")
+		libc_raise_errno(f"Error mounting {source!r} ({fs}) on {target!r}" +
+		                 f" with flags=0x{flags:x} options={options!r}")
 	# note: we have to MS_REMOUNT a second time to actually make bind mounts read-only
 	if (flags & libc_MS_REMOUNT) == 0 and flags & libc_MS_RDONLY and flags & libc_MS_BIND:
 		if libc.mount(b'', target_bin, b'', libc_MS_REMOUNT|libc_MS_RDONLY, b'') < 0:
@@ -290,7 +291,7 @@ def rescue_unmount_all_pbuild():
 				mountpoints.append(v[1])
 	for mountpoint in reversed(mountpoints):
 		try:
-			libc_umount(mountpoint)
+			libc_umount(mountpoint, libc_MNT_DETACH)
 		except:
 			log(f'umount({mountpoint!r}) failed; trying with MNT_FORCE')
 			try:
@@ -302,7 +303,7 @@ def rescue_unmount_all_pbuild():
 def unmount(target, flags=0):
 	target = str(target)
 	try:
-		libc_umount(target, flags)
+		libc_umount(target, flags | libc_MNT_DETACH)
 	except OSError as err:
 		log(f"warning: failed to unmount {target!r} ({err})")
 		rescue_unmount_all_pbuild()
@@ -471,7 +472,8 @@ class OverlayFS:
 		# requires at least two upperdirs.
 		if self.is_read_only() and len(self.lowerdirs) == 1:
 			mountpoint = str(self.mountpoint)
-			libc_mount(str(self.lowerdirs[0]), mountpoint, flags=libc_MS_BIND|libc_MS_RDONLY)
+			libc_mount(str(self.lowerdirs[0]), mountpoint,
+			           flags=libc_MS_BIND|libc_MS_REC|libc_MS_RDONLY)
 			# note: we have to MS_REMOUNT a second time to make the mount read-only
 			# libc_mount("", mountpoint, flags=libc_MS_BIND|libc_MS_RDONLY|libc_MS_REMOUNT)
 			return self
@@ -1918,7 +1920,7 @@ class PkgBuild:
 			for dir in ('dev', 'proc', 'sys'):
 				mntdir = mountpoint / dir
 				mkdirs(mntdir)
-				libc_mount("/" + dir, mntdir, flags=libc_MS_BIND)
+				libc_mount("/" + dir, mntdir, flags=libc_MS_BIND|libc_MS_REC|libc_MS_SLAVE)
 				defer(unmount_and_rmdir, mntdir)
 
 			# setup archdep layers, which we bind mount
