@@ -5,7 +5,7 @@
 #!BUILDTOOL ports/curl if HERMETIC
 #
 #!DEP ports/libc [transitive]
-#!DEP ports/libncurses [transitive]
+#!DEP ports/libncurses
 #
 source /p/tools/pbuild.lib.sh
 
