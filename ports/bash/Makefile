@@ -1,6 +1,6 @@
 #!BUILDTOOL toolchain
 #!DEP ports/libc [transitive]
-#!DEP ports/libncurses [transitive]
+#!DEP ports/libncurses
 include ../../tools/playbit.defs.mk
 VERSION := 5.2.26
 
