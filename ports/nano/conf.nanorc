@@ -1,0 +1,18 @@
+## Syntax highlighting for generic .conf and .ini files.
+
+syntax conf "(\.(conf|ini|cfg)$|/etc/.+\.conf$)"
+magic "(Configuration|config|INI) file.*text"
+comment "#"
+
+# Section headers [section name]
+color brightgreen "^\[.*\]$"
+
+# Comments (starting with # or ;)
+color cyan "(^|[[:blank:]])(#|;).*"
+
+# Key-value pairs like "key: value" or "key = value"
+color brightblue "^[[:blank:]]*[A-Za-z0-9_.-]+[[:blank:]]*"
+color brightred "[[:blank:]]*[:=][[:blank:]].*$"
+
+# Trailing whitespace
+color ,green "[[:space:]]+$"

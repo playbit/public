@@ -1,0 +1,5 @@
+libc-config-*.h linguist-generated
+config-*.h linguist-generated
+nano.1 linguist-vendored
+src/* linguist-vendored
+lib/* linguist-vendored
