@@ -32,7 +32,7 @@ options:
 	-h, --help           Show help and exit
 _HELP_
 		exit ;;
-	--sha256) [ $# -gt 1 ] || _err "missing <checksum>"; SHA256=$2; shift; shift;;
+	--sha256) [ $# -gt 1 -a -n "$2" ] || _err "missing <checksum>"; SHA256=$2; shift; shift;;
 	-o) [ $# -gt 1 ] || _err "missing <file>"; OUTFILE=$2; shift; shift;;
 	-q) VERBOSE=false; QUIET=true; shift ;;
 	-v) VERBOSE=true; QUIET=false; shift ;;
