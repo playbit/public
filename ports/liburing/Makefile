@@ -2,7 +2,7 @@
 #!DEP ports/libc
 include ../../tools/playbit.defs.mk
 
-LIBURING_VERSION := 2.6
+LIBURING_VERSION := 2.9
 
 PRODUCTS := \
 	lib/liburing.a \
@@ -15,11 +15,17 @@ PRODUCTS := \
 	usr/include/liburing/compat.h
 
 SRCS := \
-  queue.c \
-  register.c \
-  setup.c \
-  syscall.c \
-  version.c
+	queue.c \
+	register.c \
+	setup.c \
+	syscall.c \
+	version.c \
+
+ifeq ($(ASAN),1)
+	SRCS   += sanitize.c
+	CFLAGS += -DCONFIG_USE_SANITIZER
+	CFLAGS += -I$(shell dirname "$$(dirname "$$(cc -print-libgcc-file-name)")")/include
+endif
 
 CFLAGS += \
 	-O3 \
@@ -32,14 +38,16 @@ CFLAGS += \
 	-D_FILE_OFFSET_BITS=64 \
 	-DLIBURING_INTERNAL \
 	\
-  -DCONFIG_HAVE_FANOTIFY \
-  -DCONFIG_HAVE_FUTEXV \
-  -DCONFIG_HAVE_GLIBC_STATX \
-  -DCONFIG_HAVE_KERNEL_RWF_T \
-  -DCONFIG_HAVE_KERNEL_TIMESPEC \
-  -DCONFIG_HAVE_NVME_URING \
-  -DCONFIG_HAVE_OPEN_HOW \
-  -DCONFIG_HAVE_STATX
+	-DCONFIG_HAVE_KERNEL_RWF_T \
+	-DCONFIG_HAVE_KERNEL_TIMESPEC \
+	-DCONFIG_HAVE_OPEN_HOW \
+	-DCONFIG_HAVE_STATX \
+	-DCONFIG_HAVE_GLIBC_STATX \
+	-DCONFIG_HAVE_CXX \
+	-DCONFIG_HAVE_NVME_URING \
+	-DCONFIG_HAVE_FANOTIFY \
+	-DCONFIG_HAVE_FUTEXV \
+	-DCONFIG_HAVE_UBLK_HEADER \
 
 PRODUCTS := $(addprefix $(DESTDIR)/,$(PRODUCTS))
 OBJS := $(addprefix $(BUILDDIR)/,$(patsubst %,%.o,$(SRCS)))
