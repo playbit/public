@@ -1,0 +1,13 @@
+--- a/configure	2024-10-31 22:08:28.000000000 -0700
++++ b/configure	2025-03-06 18:42:27.000000000 -0800
+@@ -8552,9 +8552,7 @@
+ # GLIBC_VERSION is empty if a musl libc is used, so use the toolchain tuple
+ # in this case.
+ if test x$GLIBC_VERSION = x; then
+-    if $CC -dumpmachine | grep -q musl; then
+-        GLIBC_VERSION=musl
+-    fi
++    GLIBC_VERSION=musl
+ fi
+ 
+ # If this is glibc then figure out the generic (in file) libc.so and
