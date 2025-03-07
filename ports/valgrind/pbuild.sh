@@ -53,3 +53,9 @@ make -j$MAXJOBS
 
 # Install
 make -j$MAXJOBS install DESTDIR=$DESTDIR
+rm -rf $DESTDIR/usr/share/doc/valgrind
+for f in $DESTDIR/usr/libexec/valgrind/* $DESTDIR/lib/valgrind/* $DESTDIR/bin/vgdb; do
+	if strip "$f" 2>/dev/null; then
+		echo "STRIP $f"
+	fi
+done
