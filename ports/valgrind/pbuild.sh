@@ -1,5 +1,5 @@
-# libgmp is a library for high precision arithmetic
-# https://gmplib.org/
+# Tool to help find memory-management problems in programs
+# https://valgrind.org/
 #
 #!BUILDTOOL toolchain
 #!BUILDTOOL ports/curl if HERMETIC
