@@ -9,13 +9,14 @@ _relpath() {
     esac
 }
 
-# default socket file
+SOCKFILE=
+CUSTOM_SOCKFILE=
 case "$(uname -s)" in
     Darwin)
-        SOCKFILE="$HOME/Library/Application Support/Playbit/vconsole0.sock"
+        DEFAULT_SOCKFILE="$HOME/Library/Application Support/Playbit/vconsole0.sock"
         ;;
     *)
-        SOCKFILE="$(cd "$(dirname "$0")"; pwd)/vconsole0.sock"
+        DEFAULT_SOCKFILE="$(cd "$(dirname "$0")"; pwd)/vconsole0.sock"
         ;;
 esac
 
@@ -24,14 +25,14 @@ while [ $# -gt 0 ]; do case "$1" in
     -h|-help|--help) cat <<END
 Connect a terminal to a running playbit instance's root system
 Usage: $0 [--help | <sockfile>]
-<sockfile> defualts to $(_relpath "$SOCKFILE")
+<sockfile> defualts to $(_relpath "$DEFAULT_SOCKFILE")
 Once in playbit, press ctrl-Q to disconnect (quit the session.)
 Bugs? Open an issue and include the output of running \`bash -x $0\`
 END
     exit 0;;
     -*) _err "unknown option: $1";;
     *)  [ -z "$SOCKFILE" ] || _err "unexpected argument: $1"
-        SOCKFILE=$(realpath "$SOCKFILE"); shift
+        SOCKFILE=$(realpath "$1"); shift
         CUSTOM_SOCKFILE=1
         ;;
 esac; done
@@ -57,6 +58,7 @@ if ! command -v socat >/dev/null; then
 fi
 
 # check socket file
+[ -n "$SOCKFILE" ] || SOCKFILE=$DEFAULT_SOCKFILE
 SOCKFILE=$(realpath "$SOCKFILE")
 if [ ! -S "$SOCKFILE" ]; then
     if [ -e "$SOCKFILE" ]; then
