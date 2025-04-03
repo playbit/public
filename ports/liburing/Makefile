@@ -1,5 +1,6 @@
 #!BUILDTOOL toolchain
 #!DEP ports/libc
+#!DEP src/kernel-headers if HERMETIC
 include ../../tools/playbit.defs.mk
 
 LIBURING_VERSION := 2.9
