@@ -12,7 +12,7 @@ source /p/tools/pbuild.lib.sh
 VERSION=4.2.1
 
 pbuild_fetch_and_unpack \
-	https://www.mpfr.org/mpfr-current/mpfr-$VERSION.tar.xz \
+	https://files.playb.it/mirror/mpfr-$VERSION.tar.xz \
 	277807353a6726978996945af13e52829e3abd7a9a5b7fb2793894e18f1fcbb2
 
 pbuild_apply_patches
