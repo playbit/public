@@ -9,8 +9,8 @@ source /p/tools/pbuild.lib.sh
 VERSION=1.0.8
 
 pbuild_fetch_and_unpack \
-	https://sourceware.org/pub/bzip2/bzip2-$VERSION.tar.gz \
-	ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269
+    https://files.playb.it/mirror/bzip2-$VERSION.tar.gz \
+    ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269
 
 pbuild_apply_patches
 
