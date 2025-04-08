@@ -6,8 +6,7 @@ Many parts of Playbit are still closed source, though we are committed to openin
 
 ## Setting up for development
 
-With Playbit running, open a terminal on your host machine and do the following
-to open a shell in your Playbit workspace and clone the repo:
+With Playbit running, open a shell in your Playbit workspace over SSH and clone the repo:
 
 ```
 $ ssh root@127.0.0.1 -p 22001 -J root@127.0.0.1:52915
