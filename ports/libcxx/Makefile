@@ -1,5 +1,5 @@
 #!BUILDTOOL toolchain
-#!DEP src/kernel-headers if HERMETIC
+#!DEP src/kernel-headers
 #!DEP ports/libc [transitive]
 #!DEP ports/libcxxabi [transitive]
 #!DEP ports/libunwind [transitive] if ARCH != "wasm32"
