@@ -13,7 +13,7 @@ source /p/tools/pbuild.lib.sh
 VERSION=6.3.0
 
 pbuild_fetch_and_unpack \
-	https://gmplib.org/download/gmp/gmp-$VERSION.tar.xz \
+	https://files.playb.it/mirror/gmp-$VERSION.tar.xz \
 	a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
 
 pbuild_apply_patches
