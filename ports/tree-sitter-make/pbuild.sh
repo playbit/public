@@ -12,7 +12,7 @@ VERSION=1.1.1
 
 pbuild_fetch_and_unpack \
     https://github.com/tree-sitter-grammars/tree-sitter-make/archive/refs/tags/v$VERSION.tar.gz \
-    42 \
+    31affca06041623cfa5f6a728cb3f0f2a8eb7fd01607e1a2681ea1f318367211 \
     tree-sitter-make-$VERSION.tar.gz
 
 PREFIX=/usr make -j$MAXJOBS
