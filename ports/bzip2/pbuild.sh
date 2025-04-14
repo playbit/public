@@ -42,4 +42,5 @@ rm -f $DESTDIR/usr/share/man/man1/bunzip2.1 \
       $DESTDIR/bin/bzfgrep \
       $DESTDIR/bin/bzless
 
+# TODO: Figure out a way to install into /bin & /lib and not have to rely on symlinks from rootfs
 make CC=cc DESTDIR=$DESTDIR PREFIX=$DESTDIR/usr install
