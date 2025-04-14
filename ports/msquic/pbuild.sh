@@ -16,7 +16,7 @@
 #
 source /p/tools/pbuild.lib.sh
 
-VERSION=2.4.5
+VERSION=2.4.8
 SRCDIR=$PWD
 
 if [ ! -e "$BUILDDIR/pb_clone_ok" ]; then
