@@ -1,6 +1,6 @@
 #!BOOTSTRAP
 #!BUILDTOOL src/cc if HERMETIC
-#!DEP src/rootfs [transitive] if HERMETIC and ARCH == NATIVE_ARCH
+#!DEP src/rootfs [transitive] if HERMETIC and ARCH == TARGET_ARCH
 #
 #!IGNORE wasi if ARCH != "wasm32"
 #!IGNORE src if ARCH == "wasm32"
