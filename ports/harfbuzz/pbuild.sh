@@ -21,6 +21,8 @@ pbuild_apply_patches
 pbuild_configure_once \
 	FREETYPE_CFLAGS=-I$DESTDIR/usr/include/freetype2 \
 	FREETYPE_LIBS="-lfreetype -lz" \
+	CFLAGS="-D HB_NO_MT" \
+	CXXFLAGS="-D HB_NO_MT" \
 	./configure \
 		--host=$CHOST \
 		--prefix=/usr \
