@@ -1,0 +1,33 @@
+--- A/include/freetype/config/ftstdlib.h	2023-08-03 03:32:17
++++ B/include/freetype/config/ftstdlib2.h	2025-06-16 14:32:59
+@@ -162,7 +162,22 @@
+    *
+    */
+ 
++#ifdef __wasm32__
+ 
++#include <assert.h>
++
++#define ft_jmp_buf     jmp_buf  /* note: this cannot be a typedef since  */
++                                /*       `jmp_buf` is defined as a macro */
++                                /*       on certain platforms            */
++typedef struct jmp_buf {
++	int empty;
++} jmp_buf;
++
++#define ft_longjmp(...)     assert(false && "longjmp not supported on WASM.")
++#define ft_setjmp( b ) (0)
++
++#else
++
+ #include <setjmp.h>
+ 
+ #define ft_jmp_buf     jmp_buf  /* note: this cannot be a typedef since  */
+@@ -172,6 +187,7 @@
+ #define ft_longjmp     longjmp
+ #define ft_setjmp( b ) setjmp( *(ft_jmp_buf*) &(b) ) /* same thing here */
+ 
++#endif
+ 
+   /* The following is only used for debugging purposes, i.e., if   */
+   /* `FT_DEBUG_LEVEL_ERROR` or `FT_DEBUG_LEVEL_TRACE` are defined. */
