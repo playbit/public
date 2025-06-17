@@ -11,7 +11,7 @@ source /p/tools/pbuild.lib.sh
 VERSION=4.6.1
 
 pbuild_fetch_and_unpack \
-	https://github.com/plougher/squashfs-tools/archive/$VERSION.tar.gz \
+	https://github.com/plougher/squashfs-tools/releases/download/$VERSION/squashfs-tools-$VERSION.tar.gz \
 	94201754b36121a9f022a190c75f718441df15402df32c2b520ca331a107511c \
 	squashfs-tools-$VERSION.tar.gz
 
