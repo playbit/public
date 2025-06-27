@@ -10,7 +10,7 @@
 #!DEP ports/libzstd
 #!DEP ports/libnghttp2
 #!DEP ports/openssl [transitive]
-#!DEP ports/xz
+#!DEP ports/xz/lib
 #!DEP ports/bzip2
 #!DEP ports/libncurses
 #
