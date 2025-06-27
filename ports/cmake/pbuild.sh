@@ -27,6 +27,11 @@ pbuild_apply_patches
 
 mkdir -p /tmp/cmake-doc
 
+# disable LTO
+ASFLAGS=${ASFLAGS/-flto=*/-fno-lto}
+CFLAGS=${CFLAGS/-flto=*/-fno-lto}
+CXXFLAGS=${CXXFLAGS/-flto=*/-fno-lto}
+
 pbuild_configure_once \
 	CFLAGS="$CFLAGS" \
 	CXXFLAGS="$CXXFLAGS" \
@@ -56,6 +61,8 @@ pbuild_configure_once \
 		--parallel=$MAXJOBS \
 		\
 		-- \
+		\
+		-DBUILD_TESTING=OFF \
 		\
 		-DZLIB_LIBRARY=$DESTDIR/lib/libz.a \
 		-DZLIB_INCLUDE_DIR=$DESTDIR/usr/include \
